@@ -14,6 +14,7 @@
 #include <cerrno>
 #include <cstring>
 #include <cstdio>
+#include <cstdlib>
 #include <sys/stat.h>
 #include <dirent.h>
 #include <unistd.h>
@@ -201,8 +202,18 @@ bool Instance::resolve(const String &spec, const String &instancesDir,
                         String &outInstance, String &outSpawn) {
     if (spec.isEmpty()) return false;
 
-    // 1. Check direct match (e.g. spec is exact instance name)
+    // Check direct path or instance directory
     InstanceState state;
+    if (load(spec, state) || pathExists(spec + "/tau.sock") || pathExists(spec + "/instance.yml") || pathExists(spec + "/state.yml")) {
+        char r[4096];
+        if (::realpath(spec.c_str(), r)) outInstance = String(r);
+        else outInstance = spec;
+        auto *first = state.firstSpawn();
+        outSpawn = first ? first->name : String("0");
+        return true;
+    }
+
+    // 1. Check direct match (e.g. spec is exact instance name)
     if (load(instancesDir + "/" + spec, state)) {
         outInstance = spec;
         auto *first = state.firstSpawn();

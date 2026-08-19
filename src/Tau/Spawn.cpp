@@ -455,18 +455,40 @@ int SpawnProcess::run() {
 
     String lastEntryPath = allEntries[allEntries.length() - 1];
 
-    if (_opts.globalMode) {
-        String dest = _opts.instanceDir + "/instance.yml";
-        String content = fs.read(lastEntryPath);
-        fs.write(dest, content);
-        lastEntryPath = dest;
-        _watchedEntryPath = dest;
-    } else {
-        _watchedEntryPath = lastEntryPath;
-    }
-
     if (_opts.removeOnRead) {
         _opts.headless = true;
+    }
+
+    if (_opts.headless) {
+        _watchedEntryPath = "";
+    } else if (!_opts.instanceDir.isEmpty()) {
+        mkdirP(_opts.instanceDir);
+        if (_opts.copyYaml || _opts.globalMode) {
+            String dest = _opts.instanceDir + "/manifest.yml";
+            String content = fs.read(lastEntryPath);
+            fs.write(dest, content);
+            lastEntryPath = dest;
+            if (_opts.watch) {
+                _watchedEntryPath = dest;
+            } else {
+                _watchedEntryPath = "";
+            }
+        } else {
+            String symlinkDest = _opts.instanceDir + "/manifest.yml";
+            ::unlink(symlinkDest.c_str());
+            ::symlink(lastEntryPath.c_str(), symlinkDest.c_str());
+            if (_opts.watch) {
+                _watchedEntryPath = lastEntryPath;
+            } else {
+                _watchedEntryPath = "";
+            }
+        }
+    } else {
+        if (_opts.watch) {
+            _watchedEntryPath = lastEntryPath;
+        } else {
+            _watchedEntryPath = "";
+        }
     }
 
     // Load templates (all except last entry)
@@ -508,10 +530,22 @@ int SpawnProcess::run() {
 
     // Resolve all %... and $Vars pre-run, replace with hardcoded paths in instance manifest
     Map<String, String> runnerVars = _runner->currentEnv();
+    String allArgsStr;
+    for (size_t ai = 0; ai < _opts.args.length(); ++ai) {
+        runnerVars[intStr((int)(ai + 1))] = _opts.args[ai];
+        if (ai > 0) allArgsStr += " ";
+        allArgsStr += _opts.args[ai];
+    }
+    runnerVars["args"] = allArgsStr;
+    runnerVars["*"] = allArgsStr;
+    runnerVars["@"] = allArgsStr;
+
     Manifest::resolveVariables(initialDirectives, runnerVars);
     _runner->setVars(runnerVars);
-    String resolvedYaml = Manifest::toYAML(initialDirectives);
-    fs.write(_opts.instanceDir + "/instance.yml", resolvedYaml);
+    if (!_opts.headless && !_opts.instanceDir.isEmpty()) {
+        String resolvedYaml = Manifest::toYAML(initialDirectives);
+        fs.write(_opts.instanceDir + "/instance.yml", resolvedYaml);
+    }
 
     struct stat mst;
     if (!_opts.headless && !_watchedEntryPath.isEmpty() && ::stat(_watchedEntryPath.c_str(), &mst) == 0) {

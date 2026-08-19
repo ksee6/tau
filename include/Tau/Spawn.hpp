@@ -51,9 +51,12 @@ struct SpawnOptions {
     String         sourceManifestPath; ///< Original source manifest path
     Array<String>  args;               ///< Extra args forwarded to spawned processes
 
-    bool headless     = false;         ///< Do not watch the last entry after initial read
+    bool headless     = false;         ///< Do not create instance dir, no copy, no watch
     bool removeOnRead = false;         ///< Delete last entry after reading (implies headless)
     bool globalMode   = false;         ///< Copy last entry to instances/<name>/instance.yml and watch from there
+    bool copyYaml     = true;          ///< Copy last yaml to instance dir (default: true)
+    bool watch        = true;          ///< Watch last yaml for changes (default: true)
+    String headDir;                    ///< Custom instance directory path
 
     bool attachStdin  = true;          ///< Forward stdin to first spawn (non-detach)
     bool detach       = false;         ///< Become a background daemon immediately

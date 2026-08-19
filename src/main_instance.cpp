@@ -23,23 +23,35 @@ int main(int argc, char **argv) {
     String manifestOpt  = args.option("--manifest -m").string();
     String srcManifest  = args.option("--source-manifest").string();
     String workDir      = args.option("--workdir -w").string();
-    bool   headless     = args.flag("--headless -h");
+    String headOpt      = args.option("--head").string();
+    bool   headless     = args.flag("--headless");
+    bool   copyYaml     = args.option("--copy").defaults("true").boolean();
+    bool   watch        = args.option("--watch").defaults("true").boolean();
     bool   remove_      = args.flag("--remove -r");
     bool   global_      = args.flag("--global -g");
     bool   detach       = args.flag("--detach -d");
     bool   attachStdin  = args.flag("--attach-stdin");
     String detachKey    = args.option("--detach-key -k").defaults("ctrl+b").string();
-    String colOpt       = args.option("--col -c").defaults("auto").string();
-    String rowOpt       = args.option("--row -r").defaults("auto").string();
+    String colOpt       = args.option("--col").defaults("auto").string();
+    String rowOpt       = args.option("--row").defaults("auto").string();
     bool   debug        = args.flag("--debug -v");
     if (debug) g_debugMode = true;
 
     Array<String> entries;
+    Array<String> extraArgs;
+    bool afterDashDash = false;
     for (size_t i = 0; ; ++i) {
         String p = args[i];
         if (p.isEmpty()) break;
-        if (p == "--") break;
-        entries.push(p);
+        if (p == "--") {
+            afterDashDash = true;
+            continue;
+        }
+        if (afterDashDash) {
+            extraArgs.push(p);
+        } else {
+            entries.push(p);
+        }
     }
     if (entries.length() == 0 && !manifestOpt.isEmpty()) {
         entries.push(manifestOpt);
@@ -65,12 +77,21 @@ int main(int argc, char **argv) {
         }
     }
 
+    String resolvedHead;
+    if (!headOpt.isEmpty()) {
+        resolvedHead = headOpt;
+        resolvedHead = resolvedHead.replace("NAME", name).replace("%name", name).replace("{NAME}", name);
+        if (resolvedHead.endsWith("/")) resolvedHead = resolvedHead.substring(0, resolvedHead.length() - 1);
+    } else {
+        resolvedHead = Config::instanceDir(name);
+    }
+
     if (!workDir.isEmpty()) {
         (void)::chdir(workDir.c_str());
     }
 
     if (debug) {
-        String logFile = Config::instanceDir(name) + "/spawn.log";
+        String logFile = resolvedHead + "/spawn.log";
         int lfd = ::open(logFile.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
         if (lfd >= 0) {
             ::dup2(lfd, STDERR_FILENO);
@@ -81,13 +102,17 @@ int main(int argc, char **argv) {
 
     SpawnOptions opts;
     opts.instanceName       = name;
-    opts.instanceDir        = Config::instanceDir(name);
+    opts.instanceDir        = resolvedHead;
+    opts.headDir            = resolvedHead;
     opts.manifestPaths      = entries;
     opts.manifestPath       = entries[entries.length() - 1];
     opts.sourceManifestPath = srcManifest;
     opts.headless           = headless || remove_;
     opts.removeOnRead       = remove_;
     opts.globalMode         = global_;
+    opts.copyYaml           = copyYaml;
+    opts.watch              = watch;
+    opts.args               = extraArgs;
     opts.attachStdin        = attachStdin;
     opts.detach             = detach;
     opts.detachKey          = detachKey;

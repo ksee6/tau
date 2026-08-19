@@ -233,7 +233,11 @@ static int launchSpawnProcess(const String        &instanceName,
                                bool                 headless = false,
                                bool                 remove_ = false,
                                bool                 global_ = false,
-                               const String        &sourceManifestPath = "") {
+                               const String        &sourceManifestPath = "",
+                               const String        &headDir = "",
+                               bool                 copyYaml = true,
+                               bool                 watch = true,
+                               const Array<String> &extraArgs = {}) {
 
     String spawnBin = resolveExecutable("tau-instance");
 
@@ -245,7 +249,7 @@ static int launchSpawnProcess(const String        &instanceName,
         // Parent: wait for intermediate child to fork the daemon and exit
         int st; ::waitpid(pid1, &st, 0);
 
-        String instDir = Config::instanceDir(instanceName);
+        String instDir = !headDir.isEmpty() ? headDir : Config::instanceDir(instanceName);
         String sockPath = instDir + "/tau.sock";
 
         // Poll for socket readiness (up to 3 seconds)
@@ -383,7 +387,13 @@ static int launchSpawnProcess(const String        &instanceName,
     Array<const char *> argv;
     argv.push(spawnBin.c_str());
     argv.push("--name"); argv.push(instanceName.c_str());
+    if (!headDir.isEmpty()) {
+        argv.push("--head");
+        argv.push(headDir.c_str());
+    }
     if (headless) argv.push("--headless");
+    if (!copyYaml) argv.push("--no-copy");
+    if (!watch) argv.push("--no-watch");
     if (remove_)  argv.push("--remove");
     if (global_)  argv.push("--global");
     if (!sourceManifestPath.isEmpty()) {
@@ -407,6 +417,12 @@ static int launchSpawnProcess(const String        &instanceName,
 
     for (size_t i = 0; i < manifestEntries.length(); ++i) {
         argv.push(manifestEntries[i].c_str());
+    }
+    if (extraArgs.length() > 0) {
+        argv.push("--");
+        for (size_t i = 0; i < extraArgs.length(); ++i) {
+            argv.push(extraArgs[i].c_str());
+        }
     }
     argv.push(nullptr);
 
@@ -770,16 +786,19 @@ static int cmdGitHub(const Array<String> &repos,
 // ─── tau run ──────────────────────────────────────────────────────────────────
 
 static int cmdRun(Command &args) {
-    bool   detach     = args.flag("--detach -d");
-    bool   attachIn   = args.flag("--in -i");
-    String name       = args.option("--name -n").string();
-    String detachKey  = args.option("--detach-key -k").defaults("ctrl+b").string();
-    String colOpt     = args.option("--col -c").defaults("auto").string();
-    String rowOpt     = args.option("--row -r").defaults("auto").string();
-    bool   headless   = args.flag("--headless -h");
-    bool   remove_    = args.flag("--remove -r");
-    bool   global_    = args.flag("--global -g");
-    bool   debug      = args.flag("--debug -v");
+    bool   detach       = args.flag("--detach -d");
+    bool   attachIn     = args.flag("--in -i");
+    String name         = args.option("--name -n").string();
+    String detachKey    = args.option("--detach-key -k").defaults("ctrl+b").string();
+    String colOpt       = args.option("--col").defaults("auto").string();
+    String rowOpt       = args.option("--row").defaults("auto").string();
+    bool   headless     = args.flag("--headless");
+    String headOpt      = args.option("--head").string();
+    bool   copyYaml     = args.option("--copy -c").defaults("true").boolean();
+    bool   watch        = args.option("--watch -w").defaults("true").boolean();
+    bool   remove_      = args.flag("--remove -r");
+    bool   global_      = args.flag("--global -g");
+    bool   debug        = args.flag("--debug -v");
     String timestampOpt = args.option("--timestamp -t").string();
     if (debug) g_debugMode = true;
 
@@ -799,10 +818,20 @@ static int cmdRun(Command &args) {
     }
 
     Array<String> positionals;
+    Array<String> extraArgs;
+    bool afterDashDash = false;
     for (size_t i = 0; ; ++i) {
         String p = args[i];
-        if (p.isEmpty() || p == "--") break;
-        positionals.push(p);
+        if (p.isEmpty()) break;
+        if (p == "--") {
+            afterDashDash = true;
+            continue;
+        }
+        if (afterDashDash) {
+            extraArgs.push(p);
+        } else {
+            positionals.push(p);
+        }
     }
 
     if (positionals.length() == 0) {
@@ -885,10 +914,20 @@ static int cmdRun(Command &args) {
     String instanceName = uniqueInstanceName(name.isEmpty() ? "0" : name);
     bool attachStdin = attachIn || !detach;
 
-    Config::ensureLayout();
-    String instDir = Config::instanceDir(instanceName);
-    Resource::LinuxFS fs;
-    fs.mkdir(instDir);
+    String instDir;
+    if (headless) {
+        instDir = "";
+        copyYaml = false;
+    } else if (!headOpt.isEmpty()) {
+        instDir = headOpt;
+        instDir = instDir.replace("NAME", instanceName).replace("%name", instanceName).replace("{NAME}", instanceName);
+        if (instDir.endsWith("/")) instDir = instDir.substring(0, instDir.length() - 1);
+        mkdirP(instDir);
+    } else {
+        Config::ensureLayout();
+        instDir = Config::instanceDir(instanceName);
+        mkdirP(instDir);
+    }
 
     String workDir;
     char r[4096];
@@ -900,7 +939,7 @@ static int cmdRun(Command &args) {
 
     return launchSpawnProcess(instanceName, positionals, workDir,
                                detach, attachStdin, detachKey, historyLines, debug, cols, rows,
-                               headless, remove_, global_, lastEntry);
+                               headless, remove_, global_, lastEntry, instDir, copyYaml, watch, extraArgs);
 }
 
 

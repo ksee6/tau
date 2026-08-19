@@ -111,7 +111,12 @@ String Config::globalManifestPath() { return tauPath() + "/tau.yml"; }
 
 String Config::instancesPath()   { return tauPathTemp() + "/instances"; }
 String Config::monitorsPath()    { return tauPathTemp() + "/monitors"; }
-String Config::instanceDir(const String &name) { return instancesPath() + "/" + name; }
+String Config::instanceDir(const String &name) {
+    if (name.startsWith("/") || (name.find("/") >= 0 && pathExists(name))) {
+        return name;
+    }
+    return instancesPath() + "/" + name;
+}
 
 String Config::targetManifestsDir() {
     if (!_initialised) init();
