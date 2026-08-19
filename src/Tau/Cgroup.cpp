@@ -57,24 +57,62 @@ bool Cgroup::create(const String &instanceName, const String &spawnName) {
 }
 
 bool Cgroup::setMemory(const String &instanceName, const String &spawnName,
-                        size_t bytes) {
+                        size_t bytes, size_t bytesMax) {
     if (!available()) return true;
-    String path = cgroupPath(instanceName, spawnName) + "/memory.max";
-    String value = (bytes == 0) ? String("max") : intStr(bytes);
-    return writeFile(path, value + "\n");
+    String dir = cgroupPath(instanceName, spawnName);
+
+    size_t hardLimit = 0;
+    if (bytesMax > 0) {
+        hardLimit = bytesMax;
+    } else if (bytes > 0) {
+        hardLimit = bytes;
+    }
+
+    String maxVal = (hardLimit == 0) ? String("max") : intStr(hardLimit);
+    bool ok = writeFile(dir + "/memory.max", maxVal + "\n");
+
+    if (bytes > 0 && hardLimit > 0 && bytes < hardLimit) {
+        writeFile(dir + "/memory.high", intStr(bytes) + "\n");
+        writeFile(dir + "/memory.low", intStr(bytes) + "\n");
+    }
+
+    return ok;
 }
 
 bool Cgroup::setCPU(const String &instanceName, const String &spawnName,
-                     long long quota) {
+                     long long quota, long long quotaMax) {
     if (!available()) return true;
-    String path = cgroupPath(instanceName, spawnName) + "/cpu.max";
-    String value;
-    if (quota < 0) {
-        value = "max 100000";
-    } else {
-        value = intStr(quota * 1000LL) + " 100000";
+    String dir = cgroupPath(instanceName, spawnName);
+
+    long long hardQuota = -1;
+    if (quotaMax >= 0) {
+        hardQuota = quotaMax;
+    } else if (quota >= 0) {
+        hardQuota = quota;
     }
-    return writeFile(path, value + "\n");
+
+    String maxVal;
+    if (hardQuota < 0) {
+        maxVal = "max 100000";
+    } else {
+        maxVal = intStr(hardQuota * 1000LL) + " 100000";
+    }
+    bool ok = writeFile(dir + "/cpu.max", maxVal + "\n");
+
+    if (quota > 0) {
+        long long weight = quota * 10;
+        if (weight < 1) weight = 1;
+        if (weight > 10000) weight = 10000;
+        writeFile(dir + "/cpu.weight", intStr(weight) + "\n");
+    }
+
+    return ok;
+}
+
+bool Cgroup::freeze(const String &instanceName, const String &spawnName, bool frozen) {
+    if (!available()) return true;
+    String path = cgroupPath(instanceName, spawnName) + "/cgroup.freeze";
+    return writeFile(path, frozen ? "1\n" : "0\n");
 }
 
 bool Cgroup::setCPUSet(const String &instanceName, const String &spawnName,

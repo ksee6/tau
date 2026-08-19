@@ -65,6 +65,7 @@ enum class InstanceStatus {
     Running,
     Stopped,
     Failed,
+    Frozen,
 };
 
 struct InstanceState {

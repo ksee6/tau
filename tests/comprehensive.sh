@@ -7,6 +7,8 @@ TAU_STORE_BIN="$(pwd)/build/tau-store"
 TEST_DIR="/tmp/tau_comprehensive_test"
 rm -rf "$TEST_DIR"
 mkdir -p "$TEST_DIR"
+pkill -9 -f tau-instance 2>/dev/null || true
+rm -rf "/run/user/$(id -u)/tau/instances/"* 2>/dev/null || true
 cd "$TEST_DIR"
 
 echo "=================================================================="
@@ -81,7 +83,7 @@ cat << 'EOF' > test_directives.yml
 
 - xor:
     entry:
-      - spawn: echo "XOR branch 1"
+      - var: MY_NUM == 100
       - fail: XOR branch 2 fails
 
 # Timing & Spawns
@@ -92,7 +94,7 @@ cat << 'EOF' > test_directives.yml
       - spawn: echo "Background 2" > ./fs_test/bg2.txt
 EOF
 
-$TAU_BIN run test_directives.yml --name directives_inst
+$TAU_BIN run test_directives.yml --headless --remove --name directives_inst
 
 if [ ! -f "./fs_test/file1.txt" ]; then echo "ERROR: file1.txt missing"; exit 1; fi
 if [ -f "./fs_test/file2.txt" ]; then echo "ERROR: file2.txt was not unlinked"; exit 1; fi
@@ -190,7 +192,7 @@ cat << 'EOF' > bin_pkg.yml
 - bindir: ./bin_dir
 EOF
 
-$TAU_BIN run bin_pkg.yml --name bin_inst
+$TAU_BIN run bin_pkg.yml --headless --remove --name bin_inst
 
 if [ ! -x "./bin_dir/runner_cmd" ]; then echo "ERROR: ./bin_dir/runner_cmd script not executable"; exit 1; fi
 if ! grep -q "exec tau run" ./bin_dir/runner_cmd; then echo "ERROR: wrapper missing tau run execution"; exit 1; fi
@@ -201,13 +203,13 @@ echo "[TEST 8] image Directive (Create, Truncate, Format)"
 cat << 'EOF' > img_pkg.yml
 - name: img-pkg
 - image:
-    path: ./virtual_disk.img
+    source: ./virtual_disk.img
     size: 4M
     type: ext4
     create: true
 EOF
 
-$TAU_BIN run img_pkg.yml --name img_inst
+$TAU_BIN run img_pkg.yml --headless --remove --name img_inst
 
 if [ ! -f "./virtual_disk.img" ]; then echo "ERROR: virtual_disk.img not created"; exit 1; fi
 IMG_SZ=$(stat -c%s ./virtual_disk.img)
@@ -230,13 +232,13 @@ sleep 1
 
 # Check tau ls
 $TAU_BIN ls | grep -q "bg_instance"
-$TAU_BIN ls bg_instance | grep -q "daemon_spawn"
+$TAU_BIN ls bg_instance | grep -q "sleep 20"
 
 # Check tau cat
-$TAU_BIN cat bg_instance:daemon_spawn | grep -q "BG_LOG_LINE"
+$TAU_BIN cat bg_instance | grep -q "BG_LOG_LINE"
 
 # Stop background instance
-$TAU_BIN stop bg_instance:daemon_spawn --kill
+$TAU_BIN stop bg_instance --kill
 echo "✓ Passed Background Supervision & IPC"
 
 # ─── 10. Hot Reloading in tau-spawn ─────────────────────────────────────────

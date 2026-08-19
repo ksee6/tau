@@ -63,12 +63,26 @@ struct ActiveSpawn {
     String      command;
     pid_t       pid       = -1;
     int    ptyMaster = -1;   ///< -1 if not a PTY spawn
-    bool   waited  = false;
-    int    exitCode = 0;
+    bool   hasPTY    = false;
+    bool   waited    = false;
+    int    exitCode  = 0;
 
     // Rings for scrollback
     RingBuffer outRing;
     RingBuffer errRing;
+};
+
+struct RegisteredBin {
+    String name;
+    String description;
+    String manifestPath;
+    int    depth = 0;
+};
+
+struct ImageSync {
+    String upperDir;
+    String mergedDir;
+    String imgDir;
 };
 
 // ─── Runner options ────────────────────────────────────────────────────────────
@@ -96,6 +110,10 @@ struct RunnerOptions {
     Func<void(const String &spawnName, const char *data, size_t len)> onOutput;
     /// Callback invoked when an IP event occurs
     Func<void(const String &iface, const String &ip)> onIPEvent;
+    /// Callback invoked when an IP add/del action occurs
+    Func<void(const String &iface, const String &ip, const String &action)> onIPActionEvent;
+    /// Callback invoked when an interface state (up/down/created) occurs
+    Func<void(const String &iface, const String &state)> onIfaceEvent;
 };
 
 
@@ -129,11 +147,15 @@ public:
     bool resizeSpawn(const String &name, int cols, int rows);
 
 
+    /** @brief Format a user-friendly descriptive summary of a directive. */
+    static String directiveSummary(const Directive *d);
+
     /** @brief Returns all currently active spawns. */
     const Array<ActiveSpawn *> &activeSpawns() const { return _spawns; }
 
     /** @brief Current variable environment. */
     const Map<String, String> &vars() const { return _vars; }
+    void setVars(const Map<String, String> &v) { _vars = v; }
     Map<String, String> currentEnv() const; ///< vars → environment
 
 private:
@@ -145,16 +167,25 @@ private:
     Array<String>         _mounts;        ///< Tracked mount targets to unmount on exit
     Array<String>         _tempDirs;      ///< Temporary directories to clean up on exit
     Array<String>         _imagePaths;    ///< Tracked image paths to terminate fuse2fs daemons on exit
+    Array<String>         _createdVethHosts; ///< Tracked host veth interfaces to delete on exit
+    Array<String>         _createdBridges;   ///< Bridges created by this instance
+    Array<String>         _joinedBridgeTargets; ///< Targets joined to bridges by this instance
+    Array<String>         _createdLoopDevs;  ///< Tracked loop devices to detach on exit
+    Array<ImageSync>      _imageSyncs;    ///< Tracked upper/img sync pairs for persistent image overlay
     String                _activeImgDir;  ///< Active image mount directory for @/ expansion
     int                   _nextSpawnId = 0; ///< Auto-numbering for unnamed spawns
     int                   _spawnCount  = 0; ///< Total spawns for name uniqueness
-    Array<const DBin *>   _bins;        ///< Registered DBin directives
+    Array<RegisteredBin>  _bins;          ///< Registered binary definitions (with priority)
+    Array<String>         _activeBinDirs; ///< Active bindir paths for PATH modification
+    int                   _manifestDepth = 0; ///< Current sub-manifest nesting level
 
     // ─── Directive handlers (each returns the directive's boolean result) ──────
 
     bool execWait      (const DWait      &d);
     bool execWaitExit  (const DWaitExit  &d);
+    bool execRetry     (const DRetry     &d);
     bool execSpawn     (const DSpawn     &d);
+    bool execDotenv    (const DDotenv    &d);
     bool execMemory    (const DMemory    &d);
     bool execCPUSet    (const DCPUSet    &d);
     bool execCPU       (const DCPU       &d);
@@ -175,6 +206,8 @@ private:
     bool execMkdir     (const DMkdir     &d);
     bool execSymlink   (const DSymlink   &d);
     bool execImage     (const DImage     &d);
+    bool execDocker    (const DDocker    &d);
+    bool execVM        (const DVM        &d);
     bool execLocal     (const DLocal     &d);
     bool execGit       (const DGit       &d);
     bool execGHRelease (const DGHRelease &d);
@@ -203,7 +236,7 @@ private:
     String interp(const String &s) const;
 
     /// Launch a child process as a spawn directive.
-    ActiveSpawn *launchSpawn(const DSpawn &d, bool allocPTY);
+    ActiveSpawn *launchSpawn(const String &spawnName, const DSpawn &d, bool allocPTY);
 
     /// Unique spawn name: use given name, or next integer if empty.
     String allocSpawnName(const String &hint);

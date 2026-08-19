@@ -51,9 +51,11 @@ struct IsolationContext {
 
     bool      hasMemory       = false;
     size_t    memoryBytes     = 0;
+    size_t    memoryBytesMax  = 0;
 
     bool      hasCPU          = false;
     long long cpuQuota        = -1;
+    long long cpuQuotaMax     = -1;
 
     bool      hasCPUSet       = false;
     String    cpusetCPUs;
@@ -121,6 +123,24 @@ public:
      * @return true on success.
      */
     static bool doChroot(const String &path, IsolationContext &ctx);
+
+    /**
+     * @brief Initialize host namespace helper before unsharing user namespace.
+     */
+    /**
+     * @brief Initialize host namespace helper before unsharing user namespace.
+     */
+    static void initHostHelper();
+    static bool linkExists(const String &iface);
+    static bool hostCreateVeth(const String &hostName, const String &peerName);
+    static bool hostMoveNetns(const String &iface, pid_t targetPid);
+    static bool hostRunIP(const String &cmd);
+    static void hostCleanupLink(const String &iface);
+    static bool hostCreateBridge(const String &bridgeName, const String &address);
+    static bool hostJoinBridge(const String &bridgeName, const String &target);
+    static bool hostUnjoinBridge(const String &target);
+    static bool hostDeleteBridgeIfEmpty(const String &bridgeName, const Array<String> &instanceLinks);
+    static void shutdownHostHelper();
 
     /**
      * @brief Create a virtual ethernet pair on the host.
@@ -199,6 +219,11 @@ public:
      * @brief Ensure minimal /proc /tmp /dev exist inside chrootPath.
      */
     static bool ensureRootfsStubs(const String &chrootPath);
+
+    /**
+     * @brief Unmount /dev and device nodes inside chrootPath.
+     */
+    static bool cleanupRootfsStubs(const String &chrootPath);
 
     /**
      * @brief Mount a fresh procfs at <chrootPath>/proc.

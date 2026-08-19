@@ -4,10 +4,11 @@
  */
 
 #include <Tau/Spawn.hpp>
-#include <Tau/Config.hpp>
-#include <Tau/Instance.hpp>
-#include <Tau/Monitor.hpp>
+#include <Tau/Namespace.hpp>
 #include <Tau/Cgroup.hpp>
+#include <Tau/Manifest.hpp>
+#include <Tau/Monitor.hpp>
+#include <Tau/Snapshot.hpp>
 #include <Tau/Util.hpp>
 
 
@@ -25,6 +26,10 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <sys/time.h>
+#include <linux/netlink.h>
+#include <linux/rtnetlink.h>
+#include <arpa/inet.h>
+#include <net/if.h>
 
 
 namespace Tau {
@@ -65,6 +70,7 @@ SpawnProcess::~SpawnProcess() {
     _runner = nullptr;
     if (_sigPipe[0] >= 0) { ::close(_sigPipe[0]); _sigPipe[0] = -1; }
     if (_sigPipe[1] >= 0) { ::close(_sigPipe[1]); _sigPipe[1] = -1; }
+    if (_netlinkFd >= 0)  { ::close(_netlinkFd);  _netlinkFd  = -1; }
 }
 
 // ─── setupSignals ─────────────────────────────────────────────────────────────
@@ -92,6 +98,67 @@ void SpawnProcess::setupSignals() {
     signal(SIGHUP, SIG_IGN);
 }
 
+// ─── setupNetlink ─────────────────────────────────────────────────────────────
+
+void SpawnProcess::setupNetlink() {
+    if (_netlinkFd >= 0) return;
+    _netlinkFd = ::socket(AF_NETLINK, SOCK_RAW | SOCK_NONBLOCK | SOCK_CLOEXEC, NETLINK_ROUTE);
+    if (_netlinkFd >= 0) {
+        struct sockaddr_nl sa = {};
+        sa.nl_family = AF_NETLINK;
+        sa.nl_groups = RTMGRP_LINK | RTMGRP_IPV4_IFADDR | RTMGRP_IPV6_IFADDR;
+        if (::bind(_netlinkFd, (struct sockaddr *)&sa, sizeof(sa)) != 0) {
+            ::close(_netlinkFd);
+            _netlinkFd = -1;
+        }
+    }
+}
+
+void SpawnProcess::processNetlinkEvents() {
+    if (_netlinkFd < 0) return;
+    char buf[8192];
+    while (true) {
+        ssize_t len = ::recv(_netlinkFd, buf, sizeof(buf), MSG_DONTWAIT);
+        if (len <= 0) break;
+
+        struct nlmsghdr *nlh = (struct nlmsghdr *)buf;
+        for (; NLMSG_OK(nlh, (size_t)len); nlh = NLMSG_NEXT(nlh, len)) {
+            if (nlh->nlmsg_type == NLMSG_DONE) break;
+            if (nlh->nlmsg_type == RTM_NEWADDR || nlh->nlmsg_type == RTM_DELADDR) {
+                struct ifaddrmsg *ifa = (struct ifaddrmsg *)NLMSG_DATA(nlh);
+                struct rtattr *rth = IFA_RTA(ifa);
+                int rtl = IFA_PAYLOAD(nlh);
+                char ifname[IF_NAMESIZE] = {};
+                ::if_indextoname(ifa->ifa_index, ifname);
+                char ipStr[INET6_ADDRSTRLEN] = {};
+                for (; RTA_OK(rth, rtl); rth = RTA_NEXT(rth, rtl)) {
+                    if (rth->rta_type == IFA_ADDRESS || rth->rta_type == IFA_LOCAL) {
+                        if (ifa->ifa_family == AF_INET) {
+                            ::inet_ntop(AF_INET, RTA_DATA(rth), ipStr, sizeof(ipStr));
+                        } else if (ifa->ifa_family == AF_INET6) {
+                            ::inet_ntop(AF_INET6, RTA_DATA(rth), ipStr, sizeof(ipStr));
+                        }
+                    }
+                }
+                if (ifname[0] && ipStr[0]) {
+                    String action = (nlh->nlmsg_type == RTM_NEWADDR) ? "add" : "del";
+                    String ipData = "action=" + action + " iface=" + String(ifname) + " ip=" + String(ipStr) + "/" + intStr(ifa->ifa_prefixlen);
+                    Monitor::broadcast("IP", _opts.instanceName, _startupTime, ipData);
+                }
+            } else if (nlh->nlmsg_type == RTM_NEWLINK || nlh->nlmsg_type == RTM_DELLINK) {
+                struct ifinfomsg *ifi = (struct ifinfomsg *)NLMSG_DATA(nlh);
+                char ifname[IF_NAMESIZE] = {};
+                ::if_indextoname(ifi->ifi_index, ifname);
+                bool isUp = (ifi->ifi_flags & IFF_UP) != 0;
+                if (ifname[0]) {
+                    String state = (nlh->nlmsg_type == RTM_DELLINK) ? "deleted" : (isUp ? "up" : "down");
+                    Monitor::broadcast("IFACE", _opts.instanceName, _startupTime, "iface=" + String(ifname) + " state=" + state);
+                }
+            }
+        }
+    }
+}
+
 // ─── makeHandlers ─────────────────────────────────────────────────────────────
 
 IPCServer::Handlers SpawnProcess::makeHandlers() {
@@ -99,6 +166,14 @@ IPCServer::Handlers SpawnProcess::makeHandlers() {
 
     h.getPTY = [this](const String &name) -> int {
         if (!_runner) return -1;
+        if (name == "0" || name.isEmpty()) {
+            for (auto *sp : _runner->activeSpawns()) {
+                if (sp->ptyMaster >= 0 && !sp->waited) return sp->ptyMaster;
+            }
+            if (_runner->activeSpawns().length() > 0) {
+                return _runner->activeSpawns()[0]->ptyMaster;
+            }
+        }
         for (auto *sp : _runner->activeSpawns()) {
             if (sp->name == name) return sp->ptyMaster;
         }
@@ -134,6 +209,17 @@ IPCServer::Handlers SpawnProcess::makeHandlers() {
 
     h.list = [this]() -> String {
         return Instance::toYAML(_state);
+    };
+
+    h.snapshot = [this](bool isFreeze) -> String {
+        String ts;
+        bool ok = Snapshot::take(_opts.instanceDir, _state, isFreeze, ts);
+        if (ok && isFreeze) {
+            _state.status = InstanceStatus::Frozen;
+            persistState();
+            _termRequested = true;
+        }
+        return ok ? ts : "";
     };
 
     return h;
@@ -213,10 +299,12 @@ bool SpawnProcess::shouldExit() const {
 void SpawnProcess::gracefulShutdown() {
     if (!_runner) return;
 
-    // Send SIGTERM to all children
+    // Send SIGTERM to all children and their process groups
     for (auto *sp : _runner->activeSpawns()) {
-        if (sp->pid > 0 && !sp->waited)
+        if (sp->pid > 0 && !sp->waited) {
+            ::kill(-sp->pid, SIGTERM);
             ::kill(sp->pid, SIGTERM);
+        }
     }
 
     // Wait up to DEFAULT_STOP_TIMEOUT_SECS seconds, then SIGKILL
@@ -233,10 +321,12 @@ void SpawnProcess::gracefulShutdown() {
         reapChildren();
     }
 
-    // SIGKILL stragglers
+    // SIGKILL stragglers and their process groups
     for (auto *sp : _runner->activeSpawns()) {
-        if (sp->pid > 0 && !sp->waited)
+        if (sp->pid > 0 && !sp->waited) {
+            ::kill(-sp->pid, SIGKILL);
             ::kill(sp->pid, SIGKILL);
+        }
     }
 
     _runner->waitAll();
@@ -251,6 +341,9 @@ int SpawnProcess::run() {
 
     // Set up signals
     setupSignals();
+
+    // Start host namespace helper (must be done before entering any unshared namespaces)
+    Namespace::initHostHelper();
 
     // Initialise instance state
     _state.name         = _opts.instanceName;
@@ -288,11 +381,39 @@ int SpawnProcess::run() {
         }
         if (!found) _state.spawns.push(sp);
         persistState();
+
+        // Update instance.yml with spawn runtime pid / exitcode
+        String instYmlPath = _opts.instanceDir + "/instance.yml";
+        if (pathExists(instYmlPath)) {
+            Array<String> visited;
+            ParseError perr;
+            ParsedManifest pm = Manifest::load(instYmlPath, visited, perr);
+            if (perr.ok) {
+                for (auto *dir : pm.directives) {
+                    if (dir->kind == DirectiveKind::Spawn) {
+                        auto *spDir = static_cast<DSpawn*>(dir);
+                        String sname = spDir->name.isEmpty() ? "0" : spDir->name;
+                        if (sname == sp.name) {
+                            if (sp.status == SpawnStatus::Exited || sp.status == SpawnStatus::Failed) {
+                                spDir->exitCode = sp.exitCode;
+                            } else if (sp.pid > 0) {
+                                spDir->pid = sp.pid;
+                            }
+                        }
+                    }
+                }
+                String updatedYaml = Manifest::toYAML(pm.directives);
+                Resource::LinuxFS fs;
+                fs.write(instYmlPath, updatedYaml);
+            }
+        }
         logInfo("tau-instance: updated spawn ", sp.name, " (total spawns=", intStr(_state.spawns.length()), ")");
     };
 
     runOpts.onPoll = [this]() {
         _ipc.update();
+        setupNetlink();
+        processNetlinkEvents();
         reapChildren();
         checkReload();
     };
@@ -307,6 +428,14 @@ int SpawnProcess::run() {
 
     runOpts.onIPEvent = [this](const String &iface, const String &ip) {
         Monitor::broadcast("IP", _opts.instanceName, _startupTime, "iface=" + iface + " ip=" + ip);
+    };
+
+    runOpts.onIPActionEvent = [this](const String &iface, const String &ip, const String &action) {
+        Monitor::broadcast("IP", _opts.instanceName, _startupTime, "action=" + action + " iface=" + iface + " ip=" + ip);
+    };
+
+    runOpts.onIfaceEvent = [this](const String &iface, const String &state) {
+        Monitor::broadcast("IFACE", _opts.instanceName, _startupTime, "iface=" + iface + " state=" + state);
     };
 
     _runner = new Runner(runOpts);
@@ -380,6 +509,7 @@ int SpawnProcess::run() {
     // Resolve all %... and $Vars pre-run, replace with hardcoded paths in instance manifest
     Map<String, String> runnerVars = _runner->currentEnv();
     Manifest::resolveVariables(initialDirectives, runnerVars);
+    _runner->setVars(runnerVars);
     String resolvedYaml = Manifest::toYAML(initialDirectives);
     fs.write(_opts.instanceDir + "/instance.yml", resolvedYaml);
 
@@ -411,6 +541,7 @@ int SpawnProcess::run() {
     if (!runOk) {
         _state.status = InstanceStatus::Failed;
         persistState();
+        Monitor::broadcast("STOP", _opts.instanceName, _startupTime, "exit_code=1");
         _ipc.destroy();
         return 1;
     }
@@ -425,6 +556,14 @@ int SpawnProcess::run() {
         pfds[npfds].revents = 0;
         npfds++;
 
+        if (_netlinkFd < 0) setupNetlink();
+        if (_netlinkFd >= 0 && npfds < 64) {
+            pfds[npfds].fd      = _netlinkFd;
+            pfds[npfds].events  = POLLIN;
+            pfds[npfds].revents = 0;
+            npfds++;
+        }
+
         if (_runner) {
             for (auto *sp : _runner->activeSpawns()) {
                 if (sp->ptyMaster >= 0 && !sp->waited && npfds < 64) {
@@ -436,8 +575,13 @@ int SpawnProcess::run() {
             }
         }
 
+        _ipc.fillPollFds(pfds, npfds, 64);
+
         int ready = ::poll(pfds, npfds, 100);
         reapChildren();
+        processNetlinkEvents();
+
+        _ipc.update();
 
         if (ready > 0) {
             if (_runner) {
@@ -475,20 +619,29 @@ int SpawnProcess::run() {
         _runner->waitAll();
     }
 
-    _state.status = runOk ? InstanceStatus::Stopped : InstanceStatus::Failed;
+    bool wasFrozen = (_state.status == InstanceStatus::Frozen);
+    if (!wasFrozen) {
+        _state.status = runOk ? InstanceStatus::Stopped : InstanceStatus::Failed;
+    }
     persistState();
+
+    Monitor::broadcast("STOP", _opts.instanceName, _startupTime, "exit_code=" + intStr(runOk ? 0 : 1));
 
     _ipc.destroy();
     delete _runner;
     _runner = nullptr;
 
-    Monitor::broadcast("STOP", _opts.instanceName, _startupTime, "exit_code=" + intStr(runOk ? 0 : 1));
-
     // Remove instance cgroup on clean exit
-    Cgroup::removeInstance(_opts.instanceName);
+    if (!wasFrozen) {
+        Cgroup::removeInstance(_opts.instanceName);
+    }
 
-    // Remove instance directory if not explicitly preserved
-    (void)removeDirRecursive(_opts.instanceDir);
+    // Remove instance directory if not explicitly preserved (and not frozen!)
+    if (!wasFrozen) {
+        (void)removeDirRecursive(_opts.instanceDir);
+    }
+
+    Namespace::shutdownHostHelper();
 
     return runOk ? 0 : 1;
 }
@@ -507,7 +660,7 @@ void SpawnProcess::checkReload() {
 #else
         curNsec = (long long)mst.st_mtim.tv_sec * 1000000000LL + mst.st_mtim.tv_nsec;
 #endif
-        if (curNsec > 0 && _manifestMTimeNsec > 0 && curNsec != _manifestMTimeNsec) {
+        if (curNsec > 0 && _manifestMTimeNsec > 0 && curNsec > (_manifestMTimeNsec + 50000000LL)) {
             fileToReload = _watchedEntryPath;
             _manifestMTimeNsec = curNsec;
         }
@@ -521,7 +674,7 @@ void SpawnProcess::checkReload() {
 #else
         long long instNsec = (long long)mst.st_mtim.tv_sec * 1000000000LL + mst.st_mtim.tv_nsec;
 #endif
-        if (instNsec > 0 && _instYamlMTimeNsec > 0 && instNsec != _instYamlMTimeNsec) {
+        if (instNsec > 0 && _instYamlMTimeNsec > 0 && instNsec > (_instYamlMTimeNsec + 50000000LL)) {
             fileToReload = instYml;
             _instYamlMTimeNsec = instNsec;
         }

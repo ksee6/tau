@@ -42,6 +42,7 @@ String InstanceState::statusString() const {
         case InstanceStatus::Running: return "running";
         case InstanceStatus::Stopped: return "stopped";
         case InstanceStatus::Failed:  return "failed";
+        case InstanceStatus::Frozen:  return "frozen";
     }
     return "unknown";
 }
@@ -76,9 +77,14 @@ String Instance::toYAML(const InstanceState &state) {
         for (size_t i = 0; i < state.spawns.length(); ++i) {
             const SpawnState &sp = state.spawns[i];
             out += "  - name: " + sp.name + "\n";
-            out += "    pid: " + intStr(sp.pid) + "\n";
+            if (sp.status == SpawnStatus::Exited || sp.status == SpawnStatus::Failed || sp.exitCode != 0) {
+                out += "    exitcode: " + intStr(sp.exitCode) + "\n";
+                out += "    exit_code: " + intStr(sp.exitCode) + "\n";
+            }
+            if (sp.pid > 0) {
+                out += "    pid: " + intStr(sp.pid) + "\n";
+            }
             out += "    status: " + sp.statusString() + "\n";
-            out += "    exit_code: " + intStr(sp.exitCode) + "\n";
             String cmdEscaped = sp.command.replace("\"", "\\\"");
             out += "    command: \"" + cmdEscaped + "\"\n";
             out += String("    pty: ") + (sp.hasPTY ? "true" : "false") + "\n";
@@ -100,9 +106,10 @@ bool Instance::fromYAML(const String &yaml, InstanceState &out) {
     out.manifestPath = yamlChildString(&root, "manifest");
 
     String statusStr = yamlChildString(&root, "status");
-    if (statusStr == "running")     out.status = InstanceStatus::Running;
-    else if (statusStr == "failed") out.status = InstanceStatus::Failed;
-    else                             out.status = InstanceStatus::Stopped;
+    if (statusStr == "running")      out.status = InstanceStatus::Running;
+    else if (statusStr == "failed")  out.status = InstanceStatus::Failed;
+    else if (statusStr == "frozen")  out.status = InstanceStatus::Frozen;
+    else                              out.status = InstanceStatus::Stopped;
 
     NodeBase *spawnsNode = root.get("spawns");
     if (!spawnsNode) {
@@ -123,13 +130,16 @@ bool Instance::fromYAML(const String &yaml, InstanceState &out) {
             sp.name     = yamlChildString(sn, "name");
             sp.pid      = (pid_t)parseLong(yamlChildString(sn, "pid", "0"));
             sp.command  = yamlChildString(sn, "command");
-            sp.exitCode = (int)parseLong(yamlChildString(sn, "exit_code", "0"));
+            String ecStr = yamlChildString(sn, "exitcode", "");
+            if (ecStr.isEmpty()) ecStr = yamlChildString(sn, "exit_code", "0");
+            sp.exitCode = (int)parseLong(ecStr);
             sp.hasPTY   = (yamlChildString(sn, "pty") == "true");
 
             String ss = yamlChildString(sn, "status");
             if (ss == "running")      sp.status = SpawnStatus::Running;
             else if (ss == "exited")  sp.status = SpawnStatus::Exited;
             else if (ss == "failed")  sp.status = SpawnStatus::Failed;
+            else if (!ecStr.isEmpty() && ecStr != "0") sp.status = SpawnStatus::Failed;
             else                      sp.status = SpawnStatus::Stopped;
 
             if (!sp.name.isEmpty()) {

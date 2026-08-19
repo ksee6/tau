@@ -111,6 +111,7 @@ private:
 
     // Self-pipe for signal delivery into the poll() loop.
     int _sigPipe[2] = {-1, -1};
+    int _netlinkFd  = -1;
     static volatile bool _termRequested;
     long long      _manifestMTimeNsec = 0;
     long long      _instYamlMTimeNsec = 0;
@@ -121,6 +122,12 @@ private:
 
     /** @brief Set up SIGCHLD and SIGTERM handlers via sigaction. */
     void setupSignals();
+
+    /** @brief Set up Netlink route socket for IP/link kernel events. */
+    void setupNetlink();
+
+    /** @brief Drain and broadcast kernel Netlink IP and interface events. */
+    void processNetlinkEvents();
 
     /** @brief Drain _sigPipe; reap any zombie children. */
     void reapChildren();

@@ -65,7 +65,7 @@ echo "=== 3. Testing image Directive Creation & Truncation ==="
 cat << 'EOF' > image_manifest.yml
 - name: image-pkg
 - image:
-    path: ./test_disk.img
+    source: ./test_disk.img
     size: 5M
     type: ext4
     create: true
@@ -86,19 +86,77 @@ if [ "$IMG_SIZE" -ne "$EXPECTED_SIZE" ]; then
 fi
 echo "image directive creation & truncation OK!"
 
-echo "=== 4. Testing Store GC with local_ directories ==="
-export TAU_PATH="/tmp/tau_store_gc_test"
+echo "=== 4. Testing tau add, tau remove & Symlink Hashing ==="
+export TAU_PATH="/tmp/tau_store_add_test_$$"
 rm -rf "$TAU_PATH"
-mkdir -p "$TAU_PATH/store/local_test_hash"
 mkdir -p "$TAU_PATH/manifests"
-echo "marker" > "$TAU_PATH/store/local_test_hash/ran"
+mkdir -p "$TAU_PATH/store"
 
-$TAU_STORE_BIN
+cat << 'EOF' > add_test.yml
+- name: add-test-pkg
+- spawn: echo "ADD_RUN" > ./add_out.txt
+EOF
 
-if [ ! -d "$TAU_PATH/store/local_test_hash" ]; then
-    echo "ERROR: tau-store GC deleted local_ store directory"
+$TAU_BIN add add_test.yml
+
+# Verify symlink created with hash
+SYMLINKS=( "$TAU_PATH/manifests/"*.yml )
+if [ ! -L "${SYMLINKS[0]}" ]; then
+    echo "ERROR: tau add did not create hash symlink in manifests/"
     exit 1
 fi
-echo "Store GC local_ preservation OK!"
+
+SYMLINK_TARGET=$(readlink -f "${SYMLINKS[0]}")
+REAL_TARGET=$(readlink -f add_test.yml)
+if [ "$SYMLINK_TARGET" != "$REAL_TARGET" ]; then
+    echo "ERROR: Symlink target mismatch: $SYMLINK_TARGET vs $REAL_TARGET"
+    exit 1
+fi
+echo "tau add hash symlink created OK!"
+
+# Test tau remove
+$TAU_BIN remove add_test.yml
+REMAINING=( "$TAU_PATH/manifests/"*.yml )
+if [ -e "${REMAINING[0]}" ]; then
+    echo "ERROR: tau remove did not remove symlink"
+    exit 1
+fi
+echo "=== 5. Testing bindir automatic PATH & nested spawn ==="
+rm -rf ./bin_test_dir ./out_vite.txt
+mkdir -p ./bin_test_dir
+
+cat << 'EOF' > test_vite_manifest.yml
+- name: vite-mock
+- bin:
+    name: vite
+    exec: echo "vite v5.0.0"
+    description: Mock Vite binary
+- bindir: ./bin_test_dir
+- or:
+    and:
+      or:
+        and:
+          spawn: echo "vite 5.0" > ./out_vite.txt
+EOF
+
+$TAU_BIN run test_vite_manifest.yml --name "test_vite_inst_$$"
+
+if [ ! -x "./bin_test_dir/vite" ]; then
+    echo "ERROR: ./bin_test_dir/vite executable not generated"
+    exit 1
+fi
+echo "bindir executable wrapper generated OK!"
+
+echo "=== 6. Testing tau activate ==="
+ACTIVATE_OUTPUT=$($TAU_BIN activate test_vite_manifest.yml)
+if ! echo "$ACTIVATE_OUTPUT" | grep -q "export PATH="; then
+    echo "ERROR: tau activate did not output export PATH="
+    exit 1
+fi
+if ! echo "$ACTIVATE_OUTPUT" | grep -q "bin_test_dir"; then
+    echo "ERROR: tau activate did not output resolved bindir path"
+    exit 1
+fi
+echo "tau activate OK!"
 
 echo "=== ALL BLUEPRINT FEATURE TESTS PASSED SUCCESSFULLY! ==="

@@ -18,6 +18,7 @@
 #include <cstring>
 #include <cerrno>
 #include <dirent.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -76,33 +77,43 @@ inline String hexEncode(const String &raw) {
 
 // ─── Logging helpers (single-string wrappers with concat) ────────────────────
 
+static inline bool g_enableLogging = false;
 inline bool g_debugMode = false;
+
+inline void logToFile(const String &msg) {
+    (void)msg;
+}
 
 template <typename... Args>
 inline void logInfo(Args &&... args) {
-    if (!g_debugMode) return;
+    if (!g_enableLogging) return;
     String msg;
     (void)std::initializer_list<int>{
         ((msg += String(args)), 0)...
     };
+    logToFile("[INFO] " + msg);
     Xi::Log::getInstance().info(msg);
 }
 
 template <typename... Args>
 inline void logWarn(Args &&... args) {
+    if (!g_enableLogging) return;
     String msg;
     (void)std::initializer_list<int>{
         ((msg += String(args)), 0)...
     };
+    logToFile("[WARN] " + msg);
     Xi::Log::getInstance().warn(msg);
 }
 
 template <typename... Args>
 inline void logError(Args &&... args) {
+    if (!g_enableLogging) return;
     String msg;
     (void)std::initializer_list<int>{
         ((msg += String(args)), 0)...
     };
+    logToFile("[ERROR] " + msg);
     Xi::Log::getInstance().error(msg);
 }
 
@@ -119,6 +130,11 @@ inline bool isDir(const String &p) {
 }
 
 inline bool removeDirRecursive(const String &path) {
+    if (path.isEmpty() || path == "/" || path == "/root" || path == "/home" || path == "/dev" ||
+        path == "/proc" || path == "/sys" || path == "/run" || path == "/etc" || path == "/usr" ||
+        path == "/var" || path == "/bin" || path == "/sbin" || path == "/lib" || path == "/lib64") {
+        return false;
+    }
     ::chmod(path.c_str(), 0777);
     DIR *d = ::opendir(path.c_str());
     if (!d) {

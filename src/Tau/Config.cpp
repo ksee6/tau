@@ -115,11 +115,14 @@ String Config::instanceDir(const String &name) { return instancesPath() + "/" + 
 
 String Config::targetManifestsDir() {
     if (!_initialised) init();
-    String globalManifests = tauGlobal() + "/manifests";
-    String globalStoreBin  = tauGlobal() + "/tau-store";
+    String globalManifests     = tauGlobal() + "/manifests";
+    String sourceBuildStoreBin = tauGlobal() + "/source/build/tau-store";
+    String globalStoreBin      = tauGlobal() + "/tau-store";
 
-    if (isDir(globalManifests) && ::access(globalManifests.c_str(), W_OK) == 0 &&
-        pathExists(globalStoreBin) && ::access(globalStoreBin.c_str(), X_OK) == 0) {
+    bool storeExecutable = (pathExists(sourceBuildStoreBin) && ::access(sourceBuildStoreBin.c_str(), X_OK) == 0) ||
+                           (pathExists(globalStoreBin) && ::access(globalStoreBin.c_str(), X_OK) == 0);
+
+    if (isDir(globalManifests) && ::access(globalManifests.c_str(), W_OK) == 0 && storeExecutable) {
         return globalManifests;
     }
     return manifestsPath();

@@ -43,6 +43,7 @@
 
 #include <cstdint>
 #include <sys/types.h>
+#include <poll.h>
 
 namespace Tau {
 
@@ -139,6 +140,8 @@ public:
         Func<bool(const String &spawnName, int cols, int rows)> resize;
         /// Dump instance state as YAML.
         Func<String()>                                     list;
+        /// Take snapshot (or freeze) and return timestamp string (empty on error).
+        Func<String(bool isFreeze)>                        snapshot;
     };
 
 
@@ -160,6 +163,9 @@ public:
      *        available commands, send responses.  Call from event loop.
      */
     void update();
+
+    /** @brief Populate pollfd array with listener and client sockets for zero-latency wakeup. */
+    void fillPollFds(struct pollfd *pfds, nfds_t &npfds, nfds_t maxFds);
 
     /** @brief Broadcast raw output data to any attached clients for this spawn. */
     void broadcast(const String &spawnName, const char *data, size_t len);
@@ -251,6 +257,16 @@ public:
      * @brief Send LIST command and return YAML string.
      */
     String list();
+
+    /**
+     * @brief Send SNAPSHOT command and return timestamp string (empty on error).
+     */
+    String snapshot();
+
+    /**
+     * @brief Send FREEZE command and return timestamp string (empty on error).
+     */
+    String freeze();
 
     /** @brief Close connection. */
     void disconnect();

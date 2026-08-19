@@ -53,13 +53,23 @@ void Monitor::broadcast(const String &eventType,
                         const String &instanceName,
                         uint64_t      startupTime,
                         const String &data) {
+    if (startupTime == 0) startupTime = currentMicros();
     String payload = eventType + " " + instanceName + " " + intStr(startupTime);
     if (!data.isEmpty()) {
         payload += " " + data;
     }
 
     String monDir = Config::monitorsPath();
-    if (!isDir(monDir)) return;
+    mkdirP(monDir);
+
+    // Append to persistent events log for recent history
+    String logPath = monDir + "/events.log";
+    int logFd = ::open(logPath.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (logFd >= 0) {
+        String line = payload + "\n";
+        (void)::write(logFd, line.c_str(), line.length());
+        ::close(logFd);
+    }
 
     DIR *d = ::opendir(monDir.c_str());
     if (!d) return;
@@ -107,12 +117,12 @@ int Monitor::runListener(const String &regexPattern,
                          bool          powerEvents,
                          bool          ipEvents,
                          bool          allowNewer) {
+    (void)allowNewer;
     ::setvbuf(stdout, nullptr, _IONBF, 0);
     Config::ensureLayout();
     String monDir = Config::monitorsPath();
     mkdirP(monDir);
 
-    uint64_t monitorStartTime = currentMicros();
     pid_t pid = ::getpid();
     ::srand((unsigned int)::time(nullptr) ^ (unsigned int)pid);
     String sockPath = monDir + "/mon_" + intStr(pid) + "_" + intStr((uint64_t)::rand()) + ".sock";
@@ -168,14 +178,9 @@ int Monitor::runListener(const String &regexPattern,
             continue;
         }
 
-        // 2. Startup time check: if instance is newer than monitor and allowNewer is false, drop
-        if (startupTime > monitorStartTime && !allowNewer) {
-            continue;
-        }
-
-        // 3. Event filter check
+        // 2. Event filter check
         bool isPower = (eventType == "START" || eventType == "STOP");
-        bool isNet   = (eventType == "IP");
+        bool isNet   = (eventType == "IP" || eventType == "IFACE");
 
         if (!filterAll) {
             if (powerEvents && !isPower && !ipEvents) continue;
@@ -191,6 +196,8 @@ int Monitor::runListener(const String &regexPattern,
             printf("[STOP] %s %s\n", instanceName.c_str(), data.c_str());
         } else if (eventType == "IP") {
             printf("[IP] %s %s\n", instanceName.c_str(), data.c_str());
+        } else if (eventType == "IFACE") {
+            printf("[IFACE] %s %s\n", instanceName.c_str(), data.c_str());
         } else {
             printf("[%s] %s %s\n", eventType.c_str(), instanceName.c_str(), data.c_str());
         }

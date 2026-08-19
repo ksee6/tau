@@ -59,7 +59,7 @@ static NodeBase *getDictNode(NodeBase *node, const String &key) {
             return (*item)[1];
         }
         if (item->size() == 1 && (*item)[0] && (*item)[0]->getName() == key) {
-            return (*item)[0];
+            return item;
         }
     }
 
@@ -99,10 +99,12 @@ String Manifest::childString(NodeBase *node, const String &key, const String &de
                 return proto + "://" + rest;
             } else if (c->getName() != key) {
                 String sub = nodeStr(c);
-                if (!sub.isEmpty()) {
+                if (sub.isEmpty() || sub == "true" || sub == "false") {
+                    val = c->getName();
+                } else {
                     val = c->getName() + ":" + sub;
-                    break;
                 }
+                break;
             }
         }
     }
@@ -125,11 +127,28 @@ bool Manifest::childBool(NodeBase *node, const String &key, bool def) {
 // ─── Duration / size parsing ─────────────────────────────────────────────────
 
 double Manifest::parseDuration(const String &s) {
-    if (s.isEmpty()) return 0.0;
-    String num = s;
-    if (num[num.length() - 1] == 's')
-        num = num.substring(0, num.length() - 1);
-    return (double)parseLong(num);   // integer seconds for now
+    String str = s.trim();
+    if (str.isEmpty()) return 0.0;
+    if (str.endsWith("ms")) {
+        String num = str.substring(0, str.length() - 2).trim();
+        double val = ::strtod(num.c_str(), nullptr);
+        return val / 1000.0;
+    }
+    if (str.endsWith("s")) {
+        String num = str.substring(0, str.length() - 1).trim();
+        return ::strtod(num.c_str(), nullptr);
+    }
+    if (str.endsWith("m")) {
+        String num = str.substring(0, str.length() - 1).trim();
+        double val = ::strtod(num.c_str(), nullptr);
+        return val * 60.0;
+    }
+    if (str.endsWith("h")) {
+        String num = str.substring(0, str.length() - 1).trim();
+        double val = ::strtod(num.c_str(), nullptr);
+        return val * 3600.0;
+    }
+    return ::strtod(str.c_str(), nullptr);
 }
 
 size_t Manifest::parseSize(const String &s) {
@@ -146,7 +165,7 @@ size_t Manifest::parseSize(const String &s) {
 // ─── Var expression parsing ───────────────────────────────────────────────────
 
 VarOp Manifest::parseVarOp(const String &expr, String &key, String &value) {
-    auto tryOp = [&](const String &op, VarOp vop) -> bool {
+    auto tryOp = [&](const String &op) -> bool {
         long long idx = expr.find(op);
         if (idx < 0) return false;
         key   = expr.substring(0, (size_t)idx).trim();
@@ -154,14 +173,14 @@ VarOp Manifest::parseVarOp(const String &expr, String &key, String &value) {
         return true;
     };
 
-    if (tryOp(" includes ", VarOp::CheckIncludes)) return VarOp::CheckIncludes;
-    if (tryOp(" reg ",      VarOp::CheckRegex))    return VarOp::CheckRegex;
-    if (tryOp(">=",         VarOp::CheckGTE))      return VarOp::CheckGTE;
-    if (tryOp("<=",         VarOp::CheckLTE))      return VarOp::CheckLTE;
-    if (tryOp("==",         VarOp::CheckEquals))   return VarOp::CheckEquals;
-    if (tryOp(">",          VarOp::CheckGT))       return VarOp::CheckGT;
-    if (tryOp("<",          VarOp::CheckLT))       return VarOp::CheckLT;
-    if (tryOp("=",          VarOp::Assign))        return VarOp::Assign;
+    if (tryOp(" includes ")) return VarOp::CheckIncludes;
+    if (tryOp(" reg "))      return VarOp::CheckRegex;
+    if (tryOp(">="))         return VarOp::CheckGTE;
+    if (tryOp("<="))         return VarOp::CheckLTE;
+    if (tryOp("=="))         return VarOp::CheckEquals;
+    if (tryOp(">"))          return VarOp::CheckGT;
+    if (tryOp("<"))          return VarOp::CheckLT;
+    if (tryOp("="))          return VarOp::Assign;
 
     key   = expr.trim();
     value = "";
@@ -209,8 +228,6 @@ Directive *Manifest::nodeToDirective(NodeBase *node,
         return nullptr;
     }
 
-    logInfo("tau/nodeToDirective: parsed key='", key, "'");
-
 
 
 
@@ -242,18 +259,57 @@ Directive *Manifest::nodeToDirective(NodeBase *node,
         return d;
     }
 
+    // ── retry ─────────────────────────────────────────────────────────────────
+    if (key == "retry") {
+        auto *d = new DRetry();
+        if (node->size() > 0 && getDictNode(node, "children") != nullptr) {
+            d->times = (int)parseLong(childString(node, "times", "0"));
+            String bStr = childString(node, "backoff", "1s");
+            d->backoff = parseDuration(bStr);
+            if (d->backoff <= 0) d->backoff = 1.0;
+            NodeBase *chNode = getDictNode(node, "children");
+            d->children = nodeListToDirectives(chNode, basePath, visited, err);
+        } else if (node->size() > 0 && (getDictNode(node, "times") != nullptr || getDictNode(node, "backoff") != nullptr)) {
+            d->times = (int)parseLong(childString(node, "times", "0"));
+            String bStr = childString(node, "backoff", "1s");
+            d->backoff = parseDuration(bStr);
+            if (d->backoff <= 0) d->backoff = 1.0;
+            NodeBase *chNode = getDictNode(node, "children");
+            if (!chNode) chNode = getDictNode(node, "entry");
+            if (!chNode) chNode = node;
+            d->children = nodeListToDirectives(chNode, basePath, visited, err);
+        } else {
+            NodeBase *target = getDictNode(node, "entry");
+            if (!target) target = node;
+            d->times = 0;
+            d->backoff = 1.0;
+            d->children = nodeListToDirectives(target, basePath, visited, err);
+        }
+        return d;
+    }
+
+    // ── dotenv ────────────────────────────────────────────────────────────────
+    if (key == "dotenv" || key == "env_file" || key == "envfile") {
+        auto *d = new DDotenv();
+        d->path = nodeStr(node).trim();
+        return d;
+    }
+
     // ── spawn ─────────────────────────────────────────────────────────────────
     if (key == "spawn") {
         auto *d = new DSpawn();
         if (node->size() == 0 || getDictNode(node, "command") == nullptr) {
             d->command = nodeStr(node);
             d->waitForExit = true;
-            logInfo("tau/manifest: simple spawn cmd='", d->command, "' nodeStr='", nodeStr(node), "' size=", intStr(node->size()));
         } else {
             d->command     = childString(node, "command");
             d->waitForExit = childBool(node, "wait", true);
-            logInfo("tau/manifest: spawn cmd='", d->command, "' wait=", d->waitForExit ? "true" : "false");
             d->name        = childString(node, "name");
+            String pidStr  = childString(node, "pid", "");
+            if (!pidStr.isEmpty()) d->pid = (pid_t)parseLong(pidStr);
+            String ecStr   = childString(node, "exitcode", "");
+            if (ecStr.isEmpty()) ecStr = childString(node, "exit_code", "");
+            if (!ecStr.isEmpty()) d->exitCode = (int)parseLong(ecStr);
         }
         return d;
     }
@@ -262,8 +318,27 @@ Directive *Manifest::nodeToDirective(NodeBase *node,
     // ── memory ────────────────────────────────────────────────────────────────
     if (key == "memory") {
         auto *d = new DMemory();
-        d->raw   = nodeStr(node);
-        d->bytes = parseSize(d->raw);
+        if (node->size() > 0 && getDictNode(node, "limit") != nullptr) {
+            d->raw = childString(node, "limit");
+            d->rawMax = childString(node, "max");
+            if (d->rawMax.isEmpty()) d->rawMax = childString(node, "memory_max");
+        } else if (node->size() > 0 && getDictNode(node, "max") != nullptr) {
+            d->rawMax = childString(node, "max");
+            d->raw = childString(node, "memory");
+        } else {
+            d->raw = nodeStr(node);
+            d->rawMax = childString(node, "memory_max");
+            if (d->rawMax.isEmpty()) d->rawMax = childString(node, "max");
+        }
+        if (!d->raw.isEmpty())    d->bytes = parseSize(d->raw);
+        if (!d->rawMax.isEmpty()) d->bytesMax = parseSize(d->rawMax);
+        return d;
+    }
+
+    if (key == "memory_max" || key == "memory-max") {
+        auto *d = new DMemory();
+        d->rawMax = nodeStr(node);
+        d->bytesMax = parseSize(d->rawMax);
         return d;
     }
 
@@ -275,7 +350,25 @@ Directive *Manifest::nodeToDirective(NodeBase *node,
 
     if (key == "cpu") {
         auto *d = new DCPU();
-        d->quota = parseLong(nodeStr(node));
+        if (node->size() > 0 && getDictNode(node, "max") != nullptr) {
+            String qStr = childString(node, "quota");
+            if (qStr.isEmpty()) qStr = childString(node, "cpu");
+            if (!qStr.isEmpty()) d->quota = parseLong(qStr);
+            String mStr = childString(node, "max");
+            if (mStr.isEmpty()) mStr = childString(node, "cpu_max");
+            if (!mStr.isEmpty()) d->quotaMax = parseLong(mStr);
+        } else {
+            d->quota = parseLong(nodeStr(node));
+            String mStr = childString(node, "cpu_max");
+            if (mStr.isEmpty()) mStr = childString(node, "max");
+            if (!mStr.isEmpty()) d->quotaMax = parseLong(mStr);
+        }
+        return d;
+    }
+
+    if (key == "cpu_max" || key == "cpu-max") {
+        auto *d = new DCPU();
+        d->quotaMax = parseLong(nodeStr(node));
         return d;
     }
 
@@ -295,7 +388,8 @@ Directive *Manifest::nodeToDirective(NodeBase *node,
 
     if (key == "veth") {
         auto *d = new DVeth();
-        d->hostName = childString(node, "name");
+        d->hostName = childString(node, "host");
+        if (d->hostName.isEmpty()) d->hostName = childString(node, "name");
         d->peerName = childString(node, "peer");
         return d;
     }
@@ -308,12 +402,28 @@ Directive *Manifest::nodeToDirective(NodeBase *node,
 
     if (key == "newnet") {
         auto *d = new DNewNet();
-        String val = nodeStr(node);
-        if (!val.isEmpty() && val != "true" && val != "false" && val != "[]" && val != "{}") {
-            Array<String> parts = val.split(",");
-            for (size_t i = 0; i < parts.length(); ++i) {
-                String t = parts[i].trim();
-                if (!t.isEmpty() && t != "true" && t != "false" && t != "[]") d->allowList.push(t);
+        if (node->size() > 0) {
+            for (size_t i = 0; i < node->size(); ++i) {
+                String s = nodeStr((*node)[i]).trim();
+                while (s.startsWith("[") && s.endsWith("]") && s.length() >= 2) {
+                    s = s.substring(1, s.length() - 1).trim();
+                }
+                if (!s.isEmpty() && s != "true" && s != "false" && s != "[]") {
+                    d->allowList.push(s);
+                }
+            }
+        }
+        if (d->allowList.length() == 0) {
+            String val = nodeStr(node).trim();
+            while (val.startsWith("[") && val.endsWith("]") && val.length() >= 2) {
+                val = val.substring(1, val.length() - 1).trim();
+            }
+            if (!val.isEmpty() && val != "true" && val != "false" && val != "[]" && val != "{}") {
+                Array<String> parts = val.split(",");
+                for (size_t i = 0; i < parts.length(); ++i) {
+                    String t = parts[i].trim();
+                    if (!t.isEmpty() && t != "true" && t != "false" && t != "[]") d->allowList.push(t);
+                }
             }
         }
         return d;
@@ -354,9 +464,14 @@ Directive *Manifest::nodeToDirective(NodeBase *node,
 
     if (key == "bridge") {
         auto *d = new DBridge();
-        d->name    = childString(node, "name");
-        d->attach  = childString(node, "attach");
+        d->source  = childString(node, "source");
+        if (d->source.isEmpty()) d->source = childString(node, "name");
+        d->target  = childString(node, "target");
+        if (d->target.isEmpty()) d->target = childString(node, "attach");
         d->address = childString(node, "address");
+        if (d->address.isEmpty()) d->address = childString(node, "ip");
+        d->name    = d->source;
+        d->attach  = d->target;
         return d;
     }
 
@@ -405,18 +520,30 @@ Directive *Manifest::nodeToDirective(NodeBase *node,
 
     if (key == "image") {
         auto *d = new DImage();
-        d->path   = childString(node, "path");
-        d->size   = childString(node, "size");
-        d->type   = childString(node, "type", "ext4");
-        d->create = childBool(node, "create", true);
         d->source = childString(node, "source");
+        if (d->source.isEmpty()) d->source = childString(node, "path");
+        d->path   = d->source;
+        d->size   = childString(node, "size", "10G");
+        d->sizeMax = childString(node, "size_max");
+        if (d->sizeMax.isEmpty()) d->sizeMax = childString(node, "max_size");
+        d->type   = childString(node, "type", "ext4");
+        d->table  = childString(node, "table");
+        if (d->table.isEmpty() && (d->type == "gpt" || d->type == "mbr" || d->type == "dos")) {
+            d->table = d->type;
+        }
+        d->format = childString(node, "format", "raw");
+        d->label  = childString(node, "label");
+        d->create = childBool(node, "create", true);
+        d->resize = childBool(node, "resize", true);
+        d->fsck   = childBool(node, "fsck",   true);
+        d->upper  = childString(node, "upper");
         d->work   = childString(node, "work");
         d->lower  = childString(node, "lower");
         d->target = childString(node, "target");
         d->read   = childBool(node, "read",  true);
         d->write  = childBool(node, "write", true);
 
-        NodeBase *partNode = node->get("partitions");
+        NodeBase *partNode = getDictNode(node, "partitions");
         if (partNode) {
             for (size_t i = 0; i < partNode->size(); ++i) {
                 auto *pn = (*partNode)[i];
@@ -425,13 +552,99 @@ Directive *Manifest::nodeToDirective(NodeBase *node,
                 p.name   = childString(pn, "name");
                 p.uuid   = childString(pn, "uuid");
                 p.size   = childString(pn, "size");
-                p.source = childString(pn, "source", "@/");
+                p.offset = childString(pn, "offset");
+                p.type   = childString(pn, "type");
+                if (p.type.isEmpty()) p.type = childString(pn, "fstype", "ext4");
+                p.fstype = p.type;
+                p.label  = childString(pn, "label");
+                p.flags  = childString(pn, "flags");
+                String numStr = childString(pn, "number");
+                p.number = !numStr.isEmpty() ? (int)::atoi(numStr.c_str()) : (int)(i + 1);
+                p.upper  = childString(pn, "upper");
+                if (p.upper.isEmpty()) p.upper = childString(pn, "source", "@/");
+                p.source = p.upper;
                 p.work   = childString(pn, "work");
                 p.lower  = childString(pn, "lower");
                 p.target = childString(pn, "target");
                 p.read   = childBool(pn, "read",  true);
                 p.write  = childBool(pn, "write", true);
                 d->partitions.push(p);
+            }
+        }
+        return d;
+    }
+
+    if (key == "docker") {
+        auto *d = new DDocker();
+        d->image  = childString(node, "image");
+        if (d->image.isEmpty()) d->image = childString(node, "source");
+
+        // Handle unquoted image:tag where tag was parsed as child node (e.g. :latest)
+        for (size_t di = 0; di < node->size(); ++di) {
+            NodeBase *ch = (*node)[di];
+            if (ch && ch->getName().startsWith(":")) {
+                if (d->image.find(":") < 0) {
+                    d->image += ch->getName();
+                }
+                if (d->target.isEmpty() || d->target == "true") {
+                    d->target = childString(ch, "target");
+                    if (d->target.isEmpty() || d->target == "true") d->target = nodeStr(ch);
+                }
+            }
+        }
+
+        if (d->target.isEmpty() || d->target == "true") d->target = childString(node, "target");
+        d->source = childString(node, "source");
+        if (d->source == d->image) d->source = childString(node, "upper");
+        d->work   = childString(node, "work");
+        d->read   = childBool(node, "read", true);
+        d->write  = childBool(node, "write", true);
+        return d;
+    }
+
+    if (key == "vm") {
+        auto *d = new DVM();
+        d->kernel      = childString(node, "kernel");
+        d->initrd      = childString(node, "initrd");
+        d->cmdline     = childString(node, "cmdline");
+        String hyp     = childString(node, "hypervisor");
+        if (!hyp.isEmpty()) d->hypervisor = hyp;
+        String acc     = childString(node, "accel");
+        if (!acc.isEmpty()) d->accel = acc;
+        d->waitForExit = childBool(node, "wait", true);
+        d->name        = childString(node, "name");
+
+        NodeBase *drivesNode = getDictNode(node, "drives");
+        if (!drivesNode) drivesNode = getDictNode(node, "drive");
+
+        if (drivesNode) {
+            for (size_t i = 0; i < drivesNode->size(); ++i) {
+                NodeBase *dn = (*drivesNode)[i];
+                if (!dn) continue;
+                VMDrive drv;
+                if (dn->size() == 0 || getDictNode(dn, "source") == nullptr) {
+                    drv.source = nodeStr(dn);
+                    drv.format = "auto";
+                    drv.read   = true;
+                    drv.write  = true;
+                } else {
+                    drv.source = childString(dn, "source");
+                    if (drv.source.isEmpty()) drv.source = childString(dn, "path");
+                    drv.format = childString(dn, "format", "auto");
+                    drv.read   = childBool(dn, "read", true);
+                    drv.write  = childBool(dn, "write", true);
+                }
+                if (!drv.source.isEmpty()) d->drives.push(drv);
+            }
+        } else {
+            String singleDrive = childString(node, "drive");
+            if (!singleDrive.isEmpty()) {
+                VMDrive drv;
+                drv.source = singleDrive;
+                drv.format = childString(node, "format", "auto");
+                drv.read   = childBool(node, "read", true);
+                drv.write  = childBool(node, "write", true);
+                d->drives.push(drv);
             }
         }
         return d;
@@ -499,6 +712,17 @@ Directive *Manifest::nodeToDirective(NodeBase *node,
 
     // ── variables ─────────────────────────────────────────────────────────────
     auto parseVar = [&](DVarBase *d) -> Directive * {
+        if (node->size() > 0) {
+            for (size_t i = 0; i < node->size(); ++i) {
+                NodeBase *c = (*node)[i];
+                if (c && !c->getName().isEmpty()) {
+                    d->key = c->getName();
+                    d->value = nodeStr(c);
+                    d->op = VarOp::Assign;
+                    return d;
+                }
+            }
+        }
         d->op = parseVarOp(nodeStr(node), d->key, d->value);
         return d;
     };
@@ -597,12 +821,27 @@ DirectiveList Manifest::nodeListToDirectives(NodeBase *list,
         if (!err.ok) break;
         NodeBase *child = (*list)[i];
         if (!child) continue;
+
+        NodeBase *vNode = (child->getName() == "var" || child->getName() == "regvar" || child->getName() == "rallvar") ? child : (child->size() > 0 ? (*child)[0] : nullptr);
+        String vKey = vNode ? vNode->getName() : child->getName();
+        if (vNode && (vKey == "var" || vKey == "regvar" || vKey == "rallvar") && vNode->size() > 0) {
+            for (size_t k = 0; k < vNode->size(); ++k) {
+                NodeBase *c = (*vNode)[k];
+                if (c && !c->getName().isEmpty()) {
+                    DVarBase *d = (vKey == "regvar") ? (DVarBase*)new DRegVar() : (vKey == "rallvar") ? (DVarBase*)new DRallVar() : (DVarBase*)new DVar();
+                    d->key = c->getName();
+                    d->value = nodeStr(c);
+                    d->op = VarOp::Assign;
+                    result.push(d);
+                }
+            }
+            continue;
+        }
+
         Directive *d = nodeToDirective(child, basePath, visited, err);
-        logInfo("tau/nodeListToDirectives: i=", intStr((int)i), " childName='", child->getName(), "' childSize=", intStr(child->size()), " d=", d ? "OK" : "NULL");
         if (d) result.push(d);
     }
     return result;
-
 }
 
 // ─── parse ────────────────────────────────────────────────────────────────────
@@ -630,12 +869,7 @@ ParsedManifest Manifest::parse(const String &yaml,
         return result;
     }
 
-    logInfo("tau/parse: root.size=", intStr(root.size()), " rootName='", root.getName(), "'");
     result.directives = nodeListToDirectives(&root, basePath, visited, err);
-    logInfo("tau/parse: parsed directives count=", intStr(result.directives.length()));
-    for (size_t i = 0; i < result.directives.length(); ++i) {
-        logInfo("  [", intStr((int)i), "] kind=", intStr((int)result.directives[i]->kind));
-    }
 
 
     for (auto *d : result.directives) {
@@ -783,8 +1017,7 @@ String Manifest::interpolate(const String &s, Map<String, String> &vars) {
 
         } else if (s[i] == '%' && i + 1 < len) {
             size_t j = i + 1;
-            while (j < len && s[j] != '/' && s[j] != ' ' && s[j] != ':' &&
-                   s[j] != '"' && s[j] != '\'' && s[j] != '`' && s[j] != ',' && s[j] != '$') {
+            while (j < len && (::isalnum(s[j]) || s[j] == '_' || s[j] == '-')) {
                 ++j;
             }
             if (j > i + 1) {
@@ -799,13 +1032,25 @@ String Manifest::interpolate(const String &s, Map<String, String> &vars) {
                         vars[varName] = eStr;
                         result += eStr;
                     } else {
-                        String allocated = "/tmp/tau-" + varName;
-                        if (pathExists(allocated)) {
-                            removeDirRecursive(allocated);
+                        bool isNumeric = true;
+                        for (size_t k = 0; k < varName.length(); ++k) {
+                            if (varName[k] < '0' || varName[k] > '9') { isNumeric = false; break; }
                         }
-                        vars[varName] = allocated;
-                        ::setenv(varName.c_str(), allocated.c_str(), 1);
-                        result += allocated;
+                        if (isNumeric) {
+                            if (s.startsWith("%" + varName) && s.length() == varName.length() + 1) {
+                                String allocated = "/tmp/tau-" + varName;
+                                if (pathExists(allocated)) {
+                                    removeDirRecursive(allocated);
+                                }
+                                vars[varName] = allocated;
+                                ::setenv(varName.c_str(), allocated.c_str(), 1);
+                                result += allocated;
+                            } else {
+                                result += varName;
+                            }
+                        } else {
+                            result += "%" + varName;
+                        }
                     }
                 }
                 i = j;
@@ -828,6 +1073,22 @@ void Manifest::resolveVariables(DirectiveList &directives, Map<String, String> &
         if (!d) continue;
 
         switch (d->kind) {
+            case DirectiveKind::Name: {
+                auto *n = static_cast<DName *>(d);
+                if (!n->value.isEmpty()) {
+                    n->value = interpolate(n->value, vars);
+                    vars["name"] = n->value;
+                    vars["NAME"] = n->value;
+                    vars["instance"] = n->value;
+                    vars["INSTANCE"] = n->value;
+                }
+                break;
+            }
+            case DirectiveKind::Description: {
+                auto *desc = static_cast<DDescription *>(d);
+                desc->value = interpolate(desc->value, vars);
+                break;
+            }
             case DirectiveKind::Spawn: {
                 auto *sp = static_cast<DSpawn *>(d);
                 sp->command = interpolate(sp->command, vars);
@@ -865,17 +1126,49 @@ void Manifest::resolveVariables(DirectiveList &directives, Map<String, String> &
             }
             case DirectiveKind::Image: {
                 auto *img = static_cast<DImage *>(d);
-                img->path = interpolate(img->path, vars);
-                if (!img->size.isEmpty()) img->size = interpolate(img->size, vars);
                 if (!img->source.isEmpty()) img->source = interpolate(img->source, vars);
+                if (!img->path.isEmpty()) img->path = interpolate(img->path, vars);
+                if (img->source.isEmpty()) img->source = img->path;
+                img->path = img->source;
+                if (!img->upper.isEmpty()) img->upper = interpolate(img->upper, vars);
+                if (!img->size.isEmpty()) img->size = interpolate(img->size, vars);
+                if (!img->label.isEmpty()) img->label = interpolate(img->label, vars);
+                if (!img->table.isEmpty()) img->table = interpolate(img->table, vars);
                 if (!img->work.isEmpty()) img->work = interpolate(img->work, vars);
                 if (!img->lower.isEmpty()) img->lower = interpolate(img->lower, vars);
                 if (!img->target.isEmpty()) img->target = interpolate(img->target, vars);
                 for (size_t p = 0; p < img->partitions.length(); ++p) {
-                    img->partitions[p].source = interpolate(img->partitions[p].source, vars);
+                    if (!img->partitions[p].name.isEmpty()) img->partitions[p].name = interpolate(img->partitions[p].name, vars);
+                    if (!img->partitions[p].size.isEmpty()) img->partitions[p].size = interpolate(img->partitions[p].size, vars);
+                    if (!img->partitions[p].offset.isEmpty()) img->partitions[p].offset = interpolate(img->partitions[p].offset, vars);
+                    if (!img->partitions[p].label.isEmpty()) img->partitions[p].label = interpolate(img->partitions[p].label, vars);
+                    if (!img->partitions[p].flags.isEmpty()) img->partitions[p].flags = interpolate(img->partitions[p].flags, vars);
+                    if (!img->partitions[p].upper.isEmpty()) img->partitions[p].upper = interpolate(img->partitions[p].upper, vars);
+                    if (!img->partitions[p].source.isEmpty()) img->partitions[p].source = interpolate(img->partitions[p].source, vars);
+                    if (img->partitions[p].upper.isEmpty()) img->partitions[p].upper = img->partitions[p].source;
+                    img->partitions[p].source = img->partitions[p].upper;
                     img->partitions[p].work   = interpolate(img->partitions[p].work, vars);
                     img->partitions[p].lower  = interpolate(img->partitions[p].lower, vars);
                     img->partitions[p].target = interpolate(img->partitions[p].target, vars);
+                }
+                break;
+            }
+            case DirectiveKind::Docker: {
+                auto *dk = static_cast<DDocker *>(d);
+                if (!dk->image.isEmpty())  dk->image  = interpolate(dk->image, vars);
+                if (!dk->target.isEmpty()) dk->target = interpolate(dk->target, vars);
+                if (!dk->source.isEmpty()) dk->source = interpolate(dk->source, vars);
+                if (!dk->work.isEmpty())   dk->work   = interpolate(dk->work, vars);
+                break;
+            }
+            case DirectiveKind::VM: {
+                auto *vm = static_cast<DVM *>(d);
+                if (!vm->kernel.isEmpty())  vm->kernel  = interpolate(vm->kernel, vars);
+                if (!vm->initrd.isEmpty())  vm->initrd  = interpolate(vm->initrd, vars);
+                if (!vm->cmdline.isEmpty()) vm->cmdline = interpolate(vm->cmdline, vars);
+                if (!vm->name.isEmpty())    vm->name    = interpolate(vm->name, vars);
+                for (size_t i = 0; i < vm->drives.length(); ++i) {
+                    vm->drives[i].source = interpolate(vm->drives[i].source, vars);
                 }
                 break;
             }
@@ -928,9 +1221,15 @@ void Manifest::resolveVariables(DirectiveList &directives, Map<String, String> &
             }
             case DirectiveKind::Bridge: {
                 auto *b = static_cast<DBridge *>(d);
-                b->name = interpolate(b->name, vars);
-                b->attach = interpolate(b->attach, vars);
-                b->address = interpolate(b->address, vars);
+                if (!b->source.isEmpty()) b->source = interpolate(b->source, vars);
+                if (!b->name.isEmpty()) b->name = interpolate(b->name, vars);
+                if (b->source.isEmpty()) b->source = b->name;
+                b->name = b->source;
+                if (!b->target.isEmpty()) b->target = interpolate(b->target, vars);
+                if (!b->attach.isEmpty()) b->attach = interpolate(b->attach, vars);
+                if (b->target.isEmpty()) b->target = b->attach;
+                b->attach = b->target;
+                if (!b->address.isEmpty()) b->address = interpolate(b->address, vars);
                 break;
             }
             case DirectiveKind::Local: {
@@ -967,6 +1266,62 @@ void Manifest::resolveVariables(DirectiveList &directives, Map<String, String> &
             case DirectiveKind::WaitExit: {
                 auto *we = static_cast<DWaitExit *>(d);
                 resolveVariables(we->children, vars);
+                break;
+            }
+            case DirectiveKind::Retry: {
+                auto *re = static_cast<DRetry *>(d);
+                resolveVariables(re->children, vars);
+                break;
+            }
+            case DirectiveKind::Dotenv: {
+                auto *de = static_cast<DDotenv *>(d);
+                de->path = interpolate(de->path, vars);
+                String p = de->path;
+                int fd = ::open(p.c_str(), O_RDONLY);
+                if (fd < 0 && p.length() > 0 && p[0] != '/') {
+                    char cwdBuf[4096];
+                    if (::getcwd(cwdBuf, sizeof(cwdBuf))) {
+                        String cand = String(cwdBuf) + "/" + p;
+                        fd = ::open(cand.c_str(), O_RDONLY);
+                    }
+                }
+                if (fd >= 0) {
+                    char buf[16384];
+                    ssize_t n = ::read(fd, buf, sizeof(buf) - 1);
+                    ::close(fd);
+                    if (n > 0) {
+                        buf[n] = '\0';
+                        String content(buf);
+                        Array<String> lines = content.split("\n");
+                        for (size_t li = 0; li < lines.length(); ++li) {
+                            String line = lines[li].trim();
+                            if (line.isEmpty() || line.startsWith("#")) continue;
+                            long long eq = line.find("=");
+                            if (eq < 0) continue;
+                            String k = line.substring(0, (size_t)eq).trim();
+                            String v = line.substring((size_t)eq + 1).trim();
+                            if (v.startsWith("\"") && v.endsWith("\"") && v.length() >= 2) {
+                                v = v.substring(1, v.length() - 1);
+                            } else if (v.startsWith("'") && v.endsWith("'") && v.length() >= 2) {
+                                v = v.substring(1, v.length() - 1);
+                            }
+                            if (!k.isEmpty()) {
+                                vars[k] = v;
+                                ::setenv(k.c_str(), v.c_str(), 1);
+                            }
+                        }
+                    }
+                }
+                break;
+            }
+            case DirectiveKind::Var: {
+                auto *v = static_cast<DVar *>(d);
+                v->key = interpolate(v->key, vars);
+                v->value = interpolate(v->value, vars);
+                if (!v->key.isEmpty() && v->op == VarOp::Assign) {
+                    vars[v->key] = v->value;
+                    ::setenv(v->key.c_str(), v->value.c_str(), 1);
+                }
                 break;
             }
             case DirectiveKind::Or: case DirectiveKind::And:
@@ -1016,6 +1371,20 @@ String Manifest::toYAML(const DirectiveList &directives, int indent) {
                 out += toYAML(v->children, indent + 8);
                 break;
             }
+            case DirectiveKind::Retry: {
+                auto *v = static_cast<DRetry*>(d);
+                out += pad + "- retry:\n";
+                out += pad + "    times: " + intStr(v->times) + "\n";
+                out += pad + "    backoff: " + doubleStr(v->backoff) + "s\n";
+                out += pad + "    children:\n";
+                out += toYAML(v->children, indent + 8);
+                break;
+            }
+            case DirectiveKind::Dotenv: {
+                auto *v = static_cast<DDotenv*>(d);
+                out += pad + "- dotenv: " + v->path + "\n";
+                break;
+            }
 
             case DirectiveKind::Spawn: {
                 auto *v = static_cast<DSpawn*>(d);
@@ -1024,12 +1393,19 @@ String Manifest::toYAML(const DirectiveList &directives, int indent) {
                 out += pad + "    command: \"" + cmdEscaped + "\"\n";
                 out += pad + "    wait: " + (v->waitForExit ? "true\n" : "false\n");
                 if (!v->name.isEmpty()) out += pad + "    name: " + v->name + "\n";
+                if (v->exitCode >= 0) {
+                    out += pad + "    exitcode: " + intStr(v->exitCode) + "\n";
+                } else if (v->pid > 0) {
+                    out += pad + "    pid: " + intStr(v->pid) + "\n";
+                }
                 break;
             }
 
             case DirectiveKind::Memory: {
                 auto *v = static_cast<DMemory*>(d);
-                out += pad + "- memory: " + v->raw + "\n";
+                out += pad + "- memory:\n";
+                if (!v->raw.isEmpty())    out += pad + "    limit: " + v->raw + "\n";
+                if (!v->rawMax.isEmpty()) out += pad + "    max: "   + v->rawMax + "\n";
                 break;
             }
             case DirectiveKind::CPUSet: {
@@ -1039,7 +1415,9 @@ String Manifest::toYAML(const DirectiveList &directives, int indent) {
             }
             case DirectiveKind::CPU: {
                 auto *v = static_cast<DCPU*>(d);
-                out += pad + "- cpu: " + intStr(v->quota) + "\n";
+                out += pad + "- cpu:\n";
+                if (v->quota >= 0)    out += pad + "    quota: " + intStr(v->quota) + "\n";
+                if (v->quotaMax >= 0) out += pad + "    max: "   + intStr(v->quotaMax) + "\n";
                 break;
             }
             case DirectiveKind::Chroot: {
@@ -1107,8 +1485,10 @@ String Manifest::toYAML(const DirectiveList &directives, int indent) {
             case DirectiveKind::Bridge: {
                 auto *v = static_cast<DBridge*>(d);
                 out += pad + "- bridge:\n";
-                out += pad + "    name: " + v->name + "\n";
-                if (!v->attach.isEmpty())  out += pad + "    attach: " + v->attach + "\n";
+                String brName = !v->source.isEmpty() ? v->source : v->name;
+                String brTarget = !v->target.isEmpty() ? v->target : v->attach;
+                out += pad + "    source: " + brName + "\n";
+                if (!brTarget.isEmpty())   out += pad + "    target: " + brTarget + "\n";
                 if (!v->address.isEmpty()) out += pad + "    address: " + v->address + "\n";
                 break;
             }
@@ -1150,11 +1530,15 @@ String Manifest::toYAML(const DirectiveList &directives, int indent) {
             case DirectiveKind::Image: {
                 auto *v = static_cast<DImage*>(d);
                 out += pad + "- image:\n";
-                out += pad + "    path: " + v->path + "\n";
-                if (!v->size.isEmpty())   out += pad + "    size: "   + v->size   + "\n";
+                String imgSource = !v->source.isEmpty() ? v->source : v->path;
+                out += pad + "    source: " + imgSource + "\n";
+                if (!v->size.isEmpty())    out += pad + "    size: "     + v->size    + "\n";
+                if (!v->sizeMax.isEmpty()) out += pad + "    size_max: " + v->sizeMax + "\n";
                 out += pad + "    type: " + v->type + "\n";
+                if (!v->table.isEmpty())  out += pad + "    table: "  + v->table  + "\n";
+                if (!v->label.isEmpty())  out += pad + "    label: "  + v->label  + "\n";
                 out += pad + "    create: " + (v->create ? "true\n" : "false\n");
-                if (!v->source.isEmpty()) out += pad + "    source: " + v->source + "\n";
+                if (!v->upper.isEmpty()) out += pad + "    upper: " + v->upper + "\n";
                 if (!v->work.isEmpty())   out += pad + "    work: "   + v->work   + "\n";
                 if (!v->lower.isEmpty())  out += pad + "    lower: "  + v->lower  + "\n";
                 if (!v->target.isEmpty()) out += pad + "    target: " + v->target + "\n";
@@ -1165,12 +1549,46 @@ String Manifest::toYAML(const DirectiveList &directives, int indent) {
                         out += pad + "      - name: " + p.name + "\n";
                         if (!p.uuid.isEmpty())   out += pad + "        uuid: "   + p.uuid   + "\n";
                         if (!p.size.isEmpty())   out += pad + "        size: "   + p.size   + "\n";
-                        out += pad + "        source: " + p.source + "\n";
+                        if (!p.type.isEmpty())   out += pad + "        type: "   + p.type   + "\n";
+                        if (!p.label.isEmpty())  out += pad + "        label: "  + p.label  + "\n";
+                        if (!p.flags.isEmpty())  out += pad + "        flags: "  + p.flags  + "\n";
+                        String pUpper = !p.upper.isEmpty() ? p.upper : p.source;
+                        if (!pUpper.isEmpty() && pUpper != "@/") out += pad + "        upper: " + pUpper + "\n";
                         if (!p.work.isEmpty())   out += pad + "        work: "   + p.work   + "\n";
                         if (!p.lower.isEmpty())  out += pad + "        lower: "  + p.lower  + "\n";
                         if (!p.target.isEmpty()) out += pad + "        target: " + p.target + "\n";
                     }
                 }
+                break;
+            }
+            case DirectiveKind::Docker: {
+                auto *v = static_cast<DDocker*>(d);
+                out += pad + "- docker:\n";
+                if (!v->image.isEmpty())  out += pad + "    image: "  + v->image  + "\n";
+                if (!v->target.isEmpty()) out += pad + "    target: " + v->target + "\n";
+                if (!v->source.isEmpty()) out += pad + "    source: " + v->source + "\n";
+                if (!v->work.isEmpty())   out += pad + "    work: "   + v->work   + "\n";
+                break;
+            }
+            case DirectiveKind::VM: {
+                auto *v = static_cast<DVM*>(d);
+                out += pad + "- vm:\n";
+                if (v->drives.length() > 0) {
+                    out += pad + "    drives:\n";
+                    for (size_t i = 0; i < v->drives.length(); ++i) {
+                        const auto &drv = v->drives[i];
+                        out += pad + "      - source: " + drv.source + "\n";
+                        if (!drv.format.isEmpty() && drv.format != "auto") {
+                            out += pad + "        format: " + drv.format + "\n";
+                        }
+                        out += pad + "        read: " + (drv.read ? "true\n" : "false\n");
+                        out += pad + "        write: " + (drv.write ? "true\n" : "false\n");
+                    }
+                }
+                if (!v->kernel.isEmpty())  out += pad + "    kernel: " + v->kernel + "\n";
+                if (!v->initrd.isEmpty())  out += pad + "    initrd: " + v->initrd + "\n";
+                if (!v->cmdline.isEmpty()) out += pad + "    cmdline: \"" + v->cmdline + "\"\n";
+                if (!v->name.isEmpty())    out += pad + "    name: " + v->name + "\n";
                 break;
             }
             case DirectiveKind::Local: {

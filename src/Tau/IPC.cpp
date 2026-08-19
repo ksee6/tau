@@ -266,10 +266,31 @@ void IPCServer::_dispatchCommand(Client *c, const String &cmd) {
     }
 
     if (verb == "LIST") {
-
         String out = _handlers.list ? _handlers.list() : "";
         ::write(c->fd, out.c_str(), out.length());
         ::write(c->fd, "\n.\n", 3);
+        return;
+    }
+
+    if (verb == "SNAPSHOT") {
+        String ts = _handlers.snapshot ? _handlers.snapshot(false) : "";
+        if (!ts.isEmpty()) {
+            String resp = "OK " + ts + "\n";
+            ::write(c->fd, resp.c_str(), resp.length());
+        } else {
+            ::write(c->fd, "ERR snapshot failed\n", 20);
+        }
+        return;
+    }
+
+    if (verb == "FREEZE") {
+        String ts = _handlers.snapshot ? _handlers.snapshot(true) : "";
+        if (!ts.isEmpty()) {
+            String resp = "OK " + ts + "\n";
+            ::write(c->fd, resp.c_str(), resp.length());
+        } else {
+            ::write(c->fd, "ERR freeze failed\n", 18);
+        }
         return;
     }
 
@@ -357,6 +378,23 @@ void IPCServer::update() {
         _processClient(_clients[i]);
         if (i < _clients.length() && _clients[i]->fd >= 0)
             ++i;
+    }
+}
+
+void IPCServer::fillPollFds(struct pollfd *pfds, nfds_t &npfds, nfds_t maxFds) {
+    if (_listenFd >= 0 && npfds < maxFds) {
+        pfds[npfds].fd      = _listenFd;
+        pfds[npfds].events  = POLLIN;
+        pfds[npfds].revents = 0;
+        npfds++;
+    }
+    for (size_t i = 0; i < _clients.length(); ++i) {
+        if (_clients[i]->fd >= 0 && npfds < maxFds) {
+            pfds[npfds].fd      = _clients[i]->fd;
+            pfds[npfds].events  = POLLIN;
+            pfds[npfds].revents = 0;
+            npfds++;
+        }
     }
 }
 
@@ -490,7 +528,12 @@ void IPCClient::attach(const String &spawnName, bool attachStdin, const String &
     }
 
     String cmd = String("ATTACH ") + spawnName;
-    String res = _sendRecv(cmd);
+    String res;
+    for (int retry = 0; retry < 500; ++retry) {
+        res = _sendRecv(cmd);
+        if (res.startsWith("OK") && res.find("exited") < 0) break;
+        ::usleep(10000); // 10ms
+    }
     if (res.isEmpty() || res.find("exited") >= 0) {
         return;
     }
@@ -522,9 +565,11 @@ void IPCClient::attach(const String &spawnName, bool attachStdin, const String &
     if (attachStdin) {
         is_tty = (::tcgetattr(STDIN_FILENO, &orig_termios) == 0);
         if (is_tty) {
+            ::tcflush(STDIN_FILENO, TCIFLUSH);
             raw_termios = orig_termios;
             ::cfmakeraw(&raw_termios);
             ::tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw_termios);
+            ::tcflush(STDIN_FILENO, TCIFLUSH);
         }
     }
 
@@ -604,9 +649,7 @@ void IPCClient::attach(const String &spawnName, bool attachStdin, const String &
     }
 
 
-    if (is_detached) {
-        Terminal::Info("[detached]");
-    }
+
 }
 
 
@@ -637,6 +680,26 @@ bool IPCClient::stop(const String &spawnName, int sig, int timeoutMs) {
 
 String IPCClient::list() {
     return _sendRecv("LIST");
+}
+
+String IPCClient::snapshot() {
+    String resp = _sendRecv("SNAPSHOT");
+    if (resp.startsWith("OK")) {
+        Array<String> parts = resp.split(" ");
+        if (parts.length() >= 2) return parts[1].trim();
+        return "true";
+    }
+    return "";
+}
+
+String IPCClient::freeze() {
+    String resp = _sendRecv("FREEZE");
+    if (resp.startsWith("OK")) {
+        Array<String> parts = resp.split(" ");
+        if (parts.length() >= 2) return parts[1].trim();
+        return "true";
+    }
+    return "";
 }
 
 void IPCClient::disconnect() {

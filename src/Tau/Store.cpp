@@ -184,7 +184,7 @@ bool Store::runManifest(const StoreEntry &entry) {
         return false;
     }
 
-    // Step 2: Run isolated sandbox process
+    // Run isolated sandbox execution
     pid_t pid = ::fork();
     if (pid < 0) {
         storeLogError(entry.manifestPath, String("fork: ") + ::strerror(errno));
@@ -209,12 +209,59 @@ bool Store::runManifest(const StoreEntry &entry) {
     bool ok = WIFEXITED(status) && WEXITSTATUS(status) == 0;
 
     if (ok) {
+        // Enforce store immutability: mark build output read-only to prevent tampering
+        String lockCmd = String("chmod -R a-w '") + entry.storeDir + "' 2>/dev/null";
+        (void)::system(lockCmd.c_str());
+
         markRan(entry.hash);
         storeLogCompleted(entry.manifestPath);
     } else {
         storeLogError(entry.manifestPath, "execution failed (kept in store)");
     }
     return ok;
+}
+
+// ─── collectDirectivesHashes ──────────────────────────────────────────────────
+
+static void collectDirectivesHashes(const DirectiveList &directives,
+                                     const String &manifestDir,
+                                     Array<String> &activeHashes) {
+    for (size_t i = 0; i < directives.length(); ++i) {
+        Directive *d = directives[i];
+        if (!d) continue;
+        if (d->kind == DirectiveKind::Git) {
+            auto *gd = static_cast<DGit *>(d);
+            GHRepo repo;
+            if (!GHRepo::parse(gd->source, repo)) {
+                repo.owner = "";
+                repo.repo  = gd->source;
+                repo.ref   = gd->branch;
+            } else {
+                repo.ref = gd->branch;
+            }
+            String commit = GitHub::resolveCommit(repo);
+            String gitUrl = gd->source;
+            if (!gitUrl.startsWith("http://") && !gitUrl.startsWith("https://") && !gitUrl.startsWith("git@")) {
+                gitUrl = String("https://github.com/") + repo.owner + "/" + repo.repo + ".git";
+            }
+            String hashName = "git_" + hexEncode(Security::hash(gitUrl + ":" + commit, 8));
+            activeHashes.push(hashName);
+        } else if (d->kind == DirectiveKind::Local) {
+            auto *ld = static_cast<DLocal *>(d);
+            String src = ld->source;
+            if (!src.startsWith("/")) src = manifestDir + "/" + src;
+            String hashName = "local_" + hexEncode(Security::hash(src, 8));
+            activeHashes.push(hashName);
+        } else if (d->kind == DirectiveKind::And || d->kind == DirectiveKind::Or ||
+                   d->kind == DirectiveKind::Nand || d->kind == DirectiveKind::Nor ||
+                   d->kind == DirectiveKind::Xor) {
+            auto *lb = static_cast<DLogicBlock *>(d);
+            collectDirectivesHashes(lb->children, manifestDir, activeHashes);
+        } else if (d->kind == DirectiveKind::WaitExit) {
+            auto *we = static_cast<DWaitExit *>(d);
+            collectDirectivesHashes(we->children, manifestDir, activeHashes);
+        }
+    }
 }
 
 // ─── garbageCollect ───────────────────────────────────────────────────────────
@@ -228,11 +275,12 @@ void Store::garbageCollect(const Array<String> &activeHashes) {
     while ((ent = ::readdir(d)) != nullptr) {
         if (ent->d_name[0] == '.') continue;
         String name(ent->d_name);
-        if (name.startsWith("local_") || name.startsWith("git_")) continue; // Preserve dependency store dirs
+        if (name.startsWith("oci_layer_") || name.startsWith("local_")) continue;
 
         bool found = false;
-        for (size_t i = 0; i < activeHashes.length(); ++i)
+        for (size_t i = 0; i < activeHashes.length(); ++i) {
             if (activeHashes[i] == name) { found = true; break; }
+        }
 
         if (!found) {
             logInfo("tau-store: GC removing ", name);
@@ -280,18 +328,48 @@ int Store::run() {
         if (!name.endsWith(".yml") && !name.endsWith(".yaml")) continue;
 
         String manifestPath = manifestsPath + "/" + name;
-        String realManifestPath = getRealPath(manifestPath);
+        char realBuf[4096] = {};
+        if (!::realpath(manifestPath.c_str(), realBuf)) {
+            // Broken symlink -> clean up
+            ::unlink(manifestPath.c_str());
+            continue;
+        }
+        String realManifestPath(realBuf);
 
-        String hash = computeHash(realManifestPath);
-        if (hash.isEmpty()) { continue; }
+        String currentHash = computeHash(realManifestPath);
+        if (currentHash.isEmpty()) { continue; }
 
-        activeHashes.push(hash);
+        String symlinkHash = name;
+        if (symlinkHash.endsWith(".yml")) symlinkHash = symlinkHash.substring(0, symlinkHash.length() - 4);
+        else if (symlinkHash.endsWith(".yaml")) symlinkHash = symlinkHash.substring(0, symlinkHash.length() - 5);
+
+        if (symlinkHash != currentHash) {
+            ::unlink(manifestPath.c_str());
+            String newSymlink = manifestsPath + "/" + currentHash + ".yml";
+            ::unlink(newSymlink.c_str());
+            ::symlink(realManifestPath.c_str(), newSymlink.c_str());
+        }
+
+        activeHashes.push(currentHash);
+
+        // Collect referenced git/local store dependencies
+        Array<String> visited;
+        ParseError err;
+        ParsedManifest parsed = Manifest::load(realManifestPath, visited, err);
+        if (err.ok) {
+            String dir = realManifestPath;
+            long long sl = rfind(dir, '/');
+            if (sl >= 0) dir = dir.substring(0, (size_t)sl);
+            collectDirectivesHashes(parsed.directives, dir, activeHashes);
+        }
+
+        bool previouslyRan = (symlinkHash == currentHash) && isRan(currentHash);
 
         StoreEntry entry;
-        entry.hash         = hash;
+        entry.hash         = currentHash;
         entry.manifestPath = realManifestPath;
-        entry.storeDir     = Config::storePath() + "/" + hash;
-        entry.ran          = isRan(hash);
+        entry.storeDir     = Config::storePath() + "/" + currentHash;
+        entry.ran          = previouslyRan;
         entries.push(entry);
     }
     ::closedir(d);
@@ -302,35 +380,28 @@ int Store::run() {
         String hash = computeHash(global);
         if (!hash.isEmpty()) {
             activeHashes.push(hash);
-            if (!isRan(hash)) {
-                StoreEntry e;
-                e.hash         = hash;
-                e.manifestPath = global;
-                e.storeDir     = Config::storePath() + "/" + hash;
-                e.ran          = false;
-                entries.push(e);
+
+            Array<String> visited;
+            ParseError err;
+            ParsedManifest parsed = Manifest::load(global, visited, err);
+            if (err.ok) {
+                String dir = global;
+                long long sl = rfind(dir, '/');
+                if (sl >= 0) dir = dir.substring(0, (size_t)sl);
+                collectDirectivesHashes(parsed.directives, dir, activeHashes);
             }
+
+            StoreEntry e;
+            e.hash         = hash;
+            e.manifestPath = global;
+            e.storeDir     = Config::storePath() + "/" + hash;
+            e.ran          = isRan(hash);
+            entries.push(e);
         }
     }
 
     bool anyFailed = false;
     for (size_t i = 0; i < entries.length(); ++i) {
-        // Ensure host-side directives (e.g. symlinking targets to store) are executed
-        Array<String> visited;
-        ParseError err;
-        ParsedManifest parsed = Manifest::load(entries[i].manifestPath, visited, err);
-        if (err.ok) {
-            RunnerOptions hostOpts;
-            hostOpts.instanceName = entries[i].hash;
-            hostOpts.manifestPath = entries[i].manifestPath;
-            hostOpts.storeMode    = true;
-            hostOpts.attachStdin  = false;
-            Runner hostRunner(hostOpts);
-            try {
-                hostRunner.run(parsed.directives);
-            } catch (...) {}
-        }
-
         if (!entries[i].ran) {
             mkdirP(entries[i].storeDir);
             if (!runManifest(entries[i])) anyFailed = true;

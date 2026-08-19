@@ -31,9 +31,11 @@ enum class DirectiveKind {
     // Timing
     Wait,
     WaitExit,
+    Retry,
 
     // Execution
     Spawn,
+    Dotenv,
 
     // Isolation
     Memory,
@@ -58,6 +60,8 @@ enum class DirectiveKind {
     Mkdir,
     Symlink,
     Image,
+    Docker,
+    VM,
 
     // Dependencies
     Local,
@@ -122,6 +126,23 @@ struct DWaitExit : Directive {
     ~DWaitExit() { for (auto *d : children) delete d; }
 };
 
+// ─── Retry ────────────────────────────────────────────────────────────────────
+/// `- retry:`
+struct DRetry : Directive {
+    int           times   = 0;   ///< 0 = infinite
+    double        backoff = 1.0; ///< seconds between retries
+    DirectiveList children;
+    DRetry() : Directive(DirectiveKind::Retry) {}
+    ~DRetry() { for (auto *d : children) delete d; }
+};
+
+// ─── Dotenv ───────────────────────────────────────────────────────────────────
+/// `- dotenv: ./path/to/.env`
+struct DDotenv : Directive {
+    String path;
+    DDotenv() : Directive(DirectiveKind::Dotenv) {}
+};
+
 // ─── Spawn ────────────────────────────────────────────────────────────────────
 /**
  * Simple form: `- spawn: ... command ...`
@@ -137,14 +158,18 @@ struct DSpawn : Directive {
     String command;
     bool   waitForExit = true;   ///< wait: true by default
     String name;                 ///< optional name; assigned numerically if empty
+    pid_t  pid         = -1;
+    int    exitCode    = -1;
     DSpawn() : Directive(DirectiveKind::Spawn) {}
 };
 
 // ─── Resource limits ─────────────────────────────────────────────────────────
-/// `- memory: 15M`
+/// `- memory: 15M` or `- memory_max: 50M`
 struct DMemory : Directive {
-    String raw;      ///< e.g. "15M", "1G"
+    String raw;          ///< Baseline allocated memory, e.g. "15M", "1G"
     size_t bytes = 0;
+    String rawMax;       ///< Maximum allowed memory (memory_max)
+    size_t bytesMax = 0;
     DMemory() : Directive(DirectiveKind::Memory) {}
 };
 
@@ -156,7 +181,8 @@ struct DCPUSet : Directive {
 
 /// `- cpu: 100`   (100 = 1 full core; cpucores*100 = unlimited)
 struct DCPU : Directive {
-    long long quota = -1;  ///< cfs_quota_us value; -1 = unlimited
+    long long quota    = -1;  ///< Baseline allocation / weight; -1 = unlimited
+    long long quotaMax = -1;  ///< Maximum quota (cpu_max); -1 = unlimited
     DCPU() : Directive(DirectiveKind::CPU) {}
 };
 
@@ -250,14 +276,19 @@ struct DIPVlan : Directive {
 
 /**
  * `- bridge:`
- * `    name: br0`
- * `    attach: veth_host`
+ * `    source: br0`
+ * `    target: veth_host`
  * `    address: 10.10.0.1/24`
  */
 struct DBridge : Directive {
+    String source;   ///< bridge name (e.g. br0)
+    String target;   ///< interface to attach (e.g. veth_cont)
+    String address;  ///< optional bridge IP/CIDR (e.g. 10.10.0.1/24)
+
+    // Backward compatibility aliases
     String name;
     String attach;
-    String address;
+
     DBridge() : Directive(DirectiveKind::Bridge) {}
 };
 
@@ -308,41 +339,114 @@ struct DSymlink : Directive {
 
 // ─── Image ────────────────────────────────────────────────────────────────────
 struct ImagePartition {
-    String name;
-    String uuid;
-    String size;
-    String source;   ///< default "@/"
-    String work;     ///< overlayfs work dir — @ resolves inside image scope
-    String lower;
-    String target;   ///< where the merged result is placed
+    String name;      ///< partition name/partlabel (e.g. "root", "boot", "esp")
+    String uuid;      ///< partition UUID / PARTUUID
+    String size;      ///< partition size (e.g. "512M", "10G", "max", "100%")
+    String offset;    ///< optional partition start offset (e.g. "1M", "2048s")
+    String type;      ///< filesystem type: ext4, ext3, ext2, xfs, btrfs, vfat, fat32, ntfs, f2fs, swap, raw
+    String fstype;    ///< alias for type
+    String label;     ///< filesystem volume label
+    String flags;     ///< partition flags: boot, esp, bios_grub, root, lvm, raid, etc.
+    int    number = 0;///< partition number (1-based, e.g. 1, 2, ...)
+
+    String upper;     ///< overlayfs upper source (renamed from source)
+    String work;      ///< overlayfs work dir — @ resolves inside image scope
+    String lower;     ///< read-only base layer
+    String target;    ///< where this partition is mounted
     bool   read  = true;
     bool   write = true;
+    String source;    ///< backward compatibility alias for upper
 };
 
 /**
  * `- image:`
- * `    path: ..`
- * `    size: 100M`
- * `    type: ext4`   # or gpt
+ * `    source: /path/to/disk.img`  # image file path on disk (renamed from path)
+ * `    size: 100M`                 # disk size (supports auto-resizing)
+ * `    type: ext4`                 # ext4, ext3, ext2, xfs, btrfs, vfat, fat32, ntfs, f2fs, squashfs, erofs, gpt, mbr
+ * `    table: gpt`                 # partition table if partitioned: gpt, mbr/dos
+ * `    label: MY_DISK`             # filesystem/disk label
  * `    create: true`
+ * `    resize: true`               # auto-resize partition & fs on image growth
+ * `    fsck: true`                 # integrity check before resize/mount
+ * `    upper: /path/to/upper`      # optional: overlayfs upper source (renamed from source)
+ * `    target: /tmp/myroot`        # optional: mount target (if omitted, only applies settings/resizes)
+ * `    partitions:`                # optional partition list
  */
 struct DImage : Directive {
-    String path;
-    String size;
-    String type;    ///< "ext4" or "gpt"
-    bool   create = true;
+    String source;      ///< image file path on disk (or raw block device)
+    String size;        ///< disk image initial allocated size (e.g. "20G", "500M")
+    String sizeMax;     ///< disk image maximum auto-expand size (size_max)
+    String type;        ///< filesystem or partition table: ext4, ext3, ext2, xfs, btrfs, vfat, fat32, ntfs, f2fs, squashfs, erofs, gpt, mbr/dos, raw, qcow2
+    String table;       ///< partition table format if partitioned: "gpt" or "mbr"/"dos"
+    String format;      ///< disk format: raw, qcow2, vmdk, vdi
+    String label;       ///< filesystem / disk label
+    bool   create = true; ///< create image file if not existing
+    bool   resize = true; ///< auto-resize partition/fs when size increases
+    bool   fsck   = true; ///< run fsck before resize/mount
 
     // @ is valid in these fields — resolves to the image's internal temp base dir
-    String source;  ///< optional: initial content source
-    String work;    ///< overlayfs work dir (auto-derived from internal temp dir if empty)
-    String lower;   ///< read-only base layer (e.g. a rootfs)
-    String target;  ///< where the merged usable root is placed (real path, e.g. /tmp/myroot)
+    String upper;       ///< optional: initial content source / overlay upper (renamed from source)
+    String work;        ///< overlayfs work dir (auto-derived from internal temp dir if empty)
+    String lower;       ///< read-only base layer (e.g. a rootfs)
+    String target;      ///< optional: where the merged usable root is placed
     bool   read  = true;
     bool   write = true;
 
-    Array<ImagePartition> partitions;  ///< populated when type == "gpt"
+    String path;        ///< backward compatibility alias for source
+
+    Array<ImagePartition> partitions;  ///< populated when partitioned (gpt or mbr)
 
     DImage() : Directive(DirectiveKind::Image) {}
+};
+
+/**
+ * `- docker:`
+ * `    image: alpine:latest`       # e.g. "alpine", "library/ubuntu:22.04", "ghcr.io/..."
+ * `    target: %5`                 # target mount directory
+ * `    source: /tmp/upper`         # optional upperdir for read-write overlay
+ * `    work: /tmp/work`            # optional workdir for read-write overlay
+ * `    read: true`
+ * `    write: true`
+ */
+struct DDocker : Directive {
+    String image;
+    String target;
+    String source;
+    String work;
+    bool   read  = true;
+    bool   write = true;
+
+    DDocker() : Directive(DirectiveKind::Docker) {}
+};
+
+/**
+ * `- vm:`
+ * `    drives:`
+ * `      - ./path/to/boot.img`
+ * `      - source: ./path/to/extra.qcow2`
+ * `        read: true`
+ * `        write: true`
+ * `        format: auto # default, or raw or qcow.`
+ */
+struct VMDrive {
+    String source;
+    String format = "auto";
+    bool   read   = true;
+    bool   write  = true;
+};
+
+struct DVM : Directive {
+    Array<VMDrive> drives;
+    String         kernel;
+    String         initrd;
+    String         cmdline;
+    String         hypervisor  = "qemu";
+    String         accel       = "kvm";
+    bool           waitForExit = true;
+    String         name;
+    pid_t          pid         = -1;
+    int            exitCode    = -1;
+    DVM() : Directive(DirectiveKind::VM) {}
 };
 
 // ─── Dependencies ─────────────────────────────────────────────────────────────

@@ -46,30 +46,43 @@ public:
     static bool create(const String &instanceName, const String &spawnName = "");
 
     /**
-     * @brief Apply a memory limit.
+     * @brief Apply memory limits (baseline allocation and maximum limit).
      *
      * @param instanceName   Instance identifier.
      * @param spawnName      Spawn identifier (optional; empty = shared instance cgroup).
-     * @param bytes          Maximum bytes (0 = unlimited / "max").
+     * @param bytes          Baseline allocation / soft limit (0 = none).
+     * @param bytesMax       Maximum bytes (0 = use baseline, or "max" if both 0).
      * @return true on success.
      */
     static bool setMemory(const String &instanceName,
                           const String &spawnName = "",
-                          size_t        bytes = 0);
+                          size_t        bytes = 0,
+                          size_t        bytesMax = 0);
 
     /**
-     * @brief Apply a CPU quota.
+     * @brief Apply CPU quota and weight (baseline allocation and maximum quota).
      *
      * @param instanceName  Instance identifier.
      * @param spawnName     Spawn identifier (optional; empty = shared instance cgroup).
-     * @param quota         Value from the `cpu:` directive (100 = 1 full core).
-     *                      Written as "<quota_us> 100000" to cpu.max.
-     *                      -1 = unlimited ("max 100000").
+     * @param quota         Baseline allocation (100 = 1 full core; -1 = default weight).
+     * @param quotaMax      Maximum quota (-1 = use baseline, or "max" if both -1).
      * @return true on success.
      */
     static bool setCPU(const String &instanceName,
                        const String &spawnName = "",
-                       long long     quota = -1);
+                       long long     quota = -1,
+                       long long     quotaMax = -1);
+
+    /**
+     * @brief Freeze or unfreeze all processes in this cgroup.
+     *
+     * Writes "1" (freeze) or "0" (unfreeze) to cgroup.freeze.
+     *
+     * @return true on success.
+     */
+    static bool freeze(const String &instanceName,
+                       const String &spawnName = "",
+                       bool          frozen = true);
 
     /**
      * @brief Apply a cpuset restriction.
