@@ -47,6 +47,7 @@ enum class SpawnStatus {
     Exited,
     Failed,
     Stopped,
+    Frozen,
 };
 
 struct SpawnState {

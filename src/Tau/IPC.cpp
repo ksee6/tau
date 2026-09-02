@@ -213,6 +213,7 @@ void IPCServer::_dispatchCommand(Client *c, const String &cmd) {
 
     if (verb == "ATTACH" && parts.length() >= 2) {
         String spawnName = parts[1];
+        if (_handlers.wake) _handlers.wake(spawnName);
         if (!_handlers.getPTY) { ::write(c->fd, "ERR no handler\n", 15); return; }
         int ptyFd = _handlers.getPTY(spawnName);
         if (ptyFd < 0) { ::write(c->fd, "OK (exited)\n", 12); return; }
@@ -223,11 +224,9 @@ void IPCServer::_dispatchCommand(Client *c, const String &cmd) {
         return;
     }
 
-
-
-
     if (verb == "CAT" && parts.length() >= 2) {
         String spawnName = parts[1];
+        if (_handlers.wake) _handlers.wake(spawnName);
         int nlines = (parts.length() >= 3) ? (int)Collection::parseLong(parts[2]) : 100;
         if (!_handlers.cat) { ::write(c->fd, ".\n", 2); return; }
         String out = _handlers.cat(spawnName, nlines);
@@ -238,8 +237,17 @@ void IPCServer::_dispatchCommand(Client *c, const String &cmd) {
 
     if (verb == "SIGNAL" && parts.length() >= 3) {
         String spawnName = parts[1];
+        if (_handlers.wake) _handlers.wake(spawnName);
         int sig = (int)Collection::parseLong(parts[2]);
         bool ok = _handlers.signal ? _handlers.signal(spawnName, sig) : false;
+        if (ok) ::write(c->fd, "OK\n", 3);
+        else    ::write(c->fd, "ERR\n", 4);
+        return;
+    }
+
+    if (verb == "WAKE") {
+        String targetSpawn = parts.length() >= 2 ? parts[1] : "";
+        bool ok = _handlers.wake ? _handlers.wake(targetSpawn) : false;
         if (ok) ::write(c->fd, "OK\n", 3);
         else    ::write(c->fd, "ERR\n", 4);
         return;
@@ -273,7 +281,8 @@ void IPCServer::_dispatchCommand(Client *c, const String &cmd) {
     }
 
     if (verb == "SNAPSHOT") {
-        String ts = _handlers.snapshot ? _handlers.snapshot(false) : "";
+        String targetSpawn = parts.length() >= 2 ? parts[1] : "";
+        String ts = _handlers.snapshot ? _handlers.snapshot(targetSpawn, false, false, false) : "";
         if (!ts.isEmpty()) {
             String resp = "OK " + ts + "\n";
             ::write(c->fd, resp.c_str(), resp.length());
@@ -284,7 +293,13 @@ void IPCServer::_dispatchCommand(Client *c, const String &cmd) {
     }
 
     if (verb == "FREEZE") {
-        String ts = _handlers.snapshot ? _handlers.snapshot(true) : "";
+        String targetSpawn = parts.length() >= 2 ? parts[1] : "";
+        bool isSoft = parts.length() >= 3 && (parts[2] == "1" || parts[2] == "true" || parts[2] == "soft");
+        bool wol = parts.length() >= 4 ? (parts[3] == "1" || parts[3] == "true" || parts[3] == "wol") : true;
+        if (!targetSpawn.isEmpty() && targetSpawn != "all") {
+            isSoft = true; // targeting a specific spawn is implicitly soft
+        }
+        String ts = _handlers.snapshot ? _handlers.snapshot(targetSpawn, true, isSoft, wol) : "";
         if (!ts.isEmpty()) {
             String resp = "OK " + ts + "\n";
             ::write(c->fd, resp.c_str(), resp.length());
@@ -682,8 +697,10 @@ String IPCClient::list() {
     return _sendRecv("LIST");
 }
 
-String IPCClient::snapshot() {
-    String resp = _sendRecv("SNAPSHOT");
+String IPCClient::snapshot(const String &spawnName) {
+    String cmd = "SNAPSHOT";
+    if (!spawnName.isEmpty()) cmd += " " + spawnName;
+    String resp = _sendRecv(cmd);
     if (resp.startsWith("OK")) {
         Array<String> parts = resp.split(" ");
         if (parts.length() >= 2) return parts[1].trim();
@@ -692,14 +709,27 @@ String IPCClient::snapshot() {
     return "";
 }
 
-String IPCClient::freeze() {
-    String resp = _sendRecv("FREEZE");
+String IPCClient::freeze(const String &spawnName, bool isSoft, bool wol) {
+    String cmd = "FREEZE";
+    if (!spawnName.isEmpty()) {
+        cmd += " " + spawnName + " " + (isSoft ? "1" : "0") + " " + (wol ? "1" : "0");
+    } else if (isSoft || !wol) {
+        cmd += " all " + String(isSoft ? "1" : "0") + " " + String(wol ? "1" : "0");
+    }
+    String resp = _sendRecv(cmd);
     if (resp.startsWith("OK")) {
         Array<String> parts = resp.split(" ");
         if (parts.length() >= 2) return parts[1].trim();
         return "true";
     }
     return "";
+}
+
+bool IPCClient::wake(const String &spawnName) {
+    String cmd = "WAKE";
+    if (!spawnName.isEmpty()) cmd += " " + spawnName;
+    String resp = _sendRecv(cmd);
+    return resp.startsWith("OK");
 }
 
 void IPCClient::disconnect() {

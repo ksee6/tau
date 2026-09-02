@@ -141,7 +141,9 @@ public:
         /// Dump instance state as YAML.
         Func<String()>                                     list;
         /// Take snapshot (or freeze) and return timestamp string (empty on error).
-        Func<String(bool isFreeze)>                        snapshot;
+        Func<String(const String &spawnName, bool isFreeze, bool isSoft, bool wol)> snapshot;
+        /// Wake a soft-frozen spawn.
+        Func<bool(const String &spawnName)>                wake;
     };
 
 
@@ -261,12 +263,17 @@ public:
     /**
      * @brief Send SNAPSHOT command and return timestamp string (empty on error).
      */
-    String snapshot();
+    String snapshot(const String &spawnName = "");
 
     /**
      * @brief Send FREEZE command and return timestamp string (empty on error).
      */
-    String freeze();
+    String freeze(const String &spawnName = "", bool isSoft = false, bool wol = false);
+
+    /**
+     * @brief Send WAKE command to resume a soft-frozen spawn.
+     */
+    bool wake(const String &spawnName = "");
 
     /** @brief Close connection. */
     void disconnect();

@@ -38,6 +38,7 @@
 #include "Instance.hpp"
 #include "Namespace.hpp"
 #include "IPC.hpp"
+#include <Meca/Meca.hpp>
 
 #include <Collection/String.hpp>
 #include <Collection/Array.hpp>
@@ -70,6 +71,16 @@ struct ActiveSpawn {
     // Rings for scrollback
     RingBuffer outRing;
     RingBuffer errRing;
+
+    // Autofreeze and WOL
+    bool   hasAutofreeze   = false;
+    bool   autofreezeWOL   = true;
+    double autofreezeCPU   = 5.0;
+    double autofreezeTimer = 20.0;
+    double idleSeconds     = 0.0;
+    bool   isFrozen        = false;
+    bool   isSoftFrozen    = false;
+    Array<int> boundPorts;
 };
 
 struct RegisteredBin {
@@ -93,6 +104,8 @@ struct RunnerOptions {
     String sourceManifestPath; ///< Original source manifest path before copying
 
     bool storeMode  = false;   ///< true when running inside tau-store
+
+    String enterSlot;          ///< Optional eslot name to enter (--enter <eslot-name>)
 
     bool attachStdin = true;   ///< Attach real stdin to first `wait: true` spawn
     bool detach      = false;  ///< true when running as background daemon supervisor
@@ -179,9 +192,24 @@ private:
     Array<String>         _activeBinDirs; ///< Active bindir paths for PATH modification
     int                   _manifestDepth = 0; ///< Current sub-manifest nesting level
 
+    // Restriction paths & Triggers
+    Array<String>         _noReadPaths;
+    Array<String>         _noWritePaths;
+    Array<String>         _noExecutePaths;
+    Array<String>         _noMountPaths;
+    Array<String>         _noWatchPaths;
+    Array<String>         _triggers;
+    bool                  _maskOutsideWaits = false;
+    Array<DESlot *>       _activeESlots;
+    bool                  _noESlotEnabled = false;
+    Array<String>         _noESlotExceptions;
+
     // ─── Directive handlers (each returns the directive's boolean result) ──────
 
     bool execWait      (const DWait      &d);
+    bool execNoWait    (const DNoWait    &d);
+    bool execWaitAll   (const DWaitAll   &d);
+    bool execTrigger   (const DTrigger   &d);
     bool execWaitExit  (const DWaitExit  &d);
     bool execRetry     (const DRetry     &d);
     bool execSpawn     (const DSpawn     &d);
@@ -189,9 +217,11 @@ private:
     bool execMemory    (const DMemory    &d);
     bool execCPUSet    (const DCPUSet    &d);
     bool execCPU       (const DCPU       &d);
+    bool execAutofreeze(const DAutofreeze &d);
     bool execChroot    (const DChroot    &d);
     bool execIsolate   (const DIsolate   &d);
     bool execVeth      (const DVeth      &d);
+    bool execRoute     (const DRoute     &d);
 
     bool execIP        (const DIP        &d);
     bool execNewNet    (const DNewNet    &d);
@@ -199,6 +229,7 @@ private:
     bool execMacvlan   (const DMacvlan   &d);
     bool execIPVlan    (const DIPVlan    &d);
     bool execBridge    (const DBridge    &d);
+    bool execPathRestriction(const DPathRestriction &d);
     bool execMount     (const DMount     &d);
 
     bool execCopy      (const DCopy      &d);
@@ -223,6 +254,9 @@ private:
     bool execFail      (const DFail      &d);
 
     bool execThrow     (const DThrow     &d);
+    bool execESlot     (const DESlot     &d);
+    bool execNoESlot   (const DNoESlot   &d);
+    bool execEntry     (const DEntry     &d);
     bool execBin       (const DBin       &d);
     bool execBinDir    (const DBinDir    &d);
 
@@ -252,6 +286,9 @@ private:
 
     /// Copy-recursive (used by copy:)
     bool copyRecursive(const String &src, const String &dst);
+
+    /// Find an ESlot definition by walking parent tau-instances up the process tree, or checking global slots
+    DESlot *findESlot(const String &name);
 
     /// Run a shell command synchronously, return true on exit 0.
     bool runShell(const String &cmd);

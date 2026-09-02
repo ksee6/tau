@@ -343,7 +343,10 @@ int Store::run() {
         if (symlinkHash.endsWith(".yml")) symlinkHash = symlinkHash.substring(0, symlinkHash.length() - 4);
         else if (symlinkHash.endsWith(".yaml")) symlinkHash = symlinkHash.substring(0, symlinkHash.length() - 5);
 
-        if (symlinkHash != currentHash) {
+        struct stat st = {};
+        bool isLink = (::lstat(manifestPath.c_str(), &st) == 0 && S_ISLNK(st.st_mode));
+
+        if (isLink && symlinkHash != currentHash) {
             ::unlink(manifestPath.c_str());
             String newSymlink = manifestsPath + "/" + currentHash + ".yml";
             ::unlink(newSymlink.c_str());

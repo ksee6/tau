@@ -50,29 +50,25 @@ void Config::init() {
     const char *uEnv = ::getenv("USER");
     if (userName.isEmpty() && uEnv) userName = String(uEnv);
 
-    // 1. TAU_GLOBAL (defaults to /var/tau)
+    // 1. TAU_GLOBAL (defaults to /.var/tau)
     const char *envGlobal = ::getenv(ENV_TAU_GLOBAL);
     _tauGlobal = expandHome(envGlobal ? String(envGlobal) : String(DEFAULT_TAU_GLOBAL));
 
     // 2. TAU_PATH_TEMP
-    // defaults to /run/user/<user>/tau for non-roots, and /run/tau for roots
+    // defaults to /tmp/tau for root (uid == 0), and /tmp/tau-<uid> for non-root
     const char *envTemp = ::getenv(ENV_TAU_PATH_TEMP);
     if (envTemp && envTemp[0] != '\0') {
         _tauPathTemp = expandHome(String(envTemp));
     } else {
         if (uid == 0) {
-            _tauPathTemp = "/run/tau";
+            _tauPathTemp = "/tmp/tau";
         } else {
-            String u = !userName.isEmpty() ? userName : intStr((long long)uid);
-            _tauPathTemp = "/run/user/" + u + "/tau";
-            if (!isDir("/run/user/" + u) && isDir("/run/user/" + intStr((long long)uid))) {
-                _tauPathTemp = "/run/user/" + intStr((long long)uid) + "/tau";
-            }
+            _tauPathTemp = "/tmp/tau-" + intStr((long long)uid);
         }
     }
 
     // 3. TAU_PATH
-    // defaults to ~/.cache/tau for users, and TAU_GLOBAL for root
+    // defaults to ~/.var/tau for users, and TAU_GLOBAL for root
     const char *envPath = ::getenv(ENV_TAU_PATH);
     if (envPath && envPath[0] != '\0') {
         _tauPath = expandHome(String(envPath));
@@ -106,6 +102,16 @@ const String &Config::tauGlobal() {
 
 String Config::storePath()       { return tauPath() + "/store"; }
 String Config::manifestsPath()   { return tauPath() + "/manifests"; }
+String Config::listsPath(const String &listName) {
+    if (listName.isEmpty()) return tauPath() + "/lists";
+    return tauPath() + "/lists/" + listName;
+}
+String Config::listTempPath(const String &listName) {
+    if (listName.isEmpty()) return tauPathTemp() + "/lists";
+    return tauPathTemp() + "/lists/" + listName;
+}
+String Config::slotsPath() { return tauPath() + "/slots"; }
+String Config::slotsGlobalPath() { return tauGlobal() + "/slots"; }
 String Config::githubCachePath() { return tauPath() + "/githubCache"; }
 String Config::globalManifestPath() { return tauPath() + "/tau.yml"; }
 
@@ -121,10 +127,14 @@ String Config::instanceDir(const String &name) {
 String Config::targetManifestsDir() {
     if (!_initialised) init();
     String globalManifests     = tauGlobal() + "/manifests";
+    String sourceBuildTauBin   = tauGlobal() + "/source/build/tau";
+    String globalTauBin        = tauGlobal() + "/tau";
     String sourceBuildStoreBin = tauGlobal() + "/source/build/tau-store";
     String globalStoreBin      = tauGlobal() + "/tau-store";
 
-    bool storeExecutable = (pathExists(sourceBuildStoreBin) && ::access(sourceBuildStoreBin.c_str(), X_OK) == 0) ||
+    bool storeExecutable = (pathExists(sourceBuildTauBin) && ::access(sourceBuildTauBin.c_str(), X_OK) == 0) ||
+                           (pathExists(globalTauBin) && ::access(globalTauBin.c_str(), X_OK) == 0) ||
+                           (pathExists(sourceBuildStoreBin) && ::access(sourceBuildStoreBin.c_str(), X_OK) == 0) ||
                            (pathExists(globalStoreBin) && ::access(globalStoreBin.c_str(), X_OK) == 0);
 
     if (isDir(globalManifests) && ::access(globalManifests.c_str(), W_OK) == 0 && storeExecutable) {

@@ -158,16 +158,17 @@ echo "✓ Passed Nested Manifest Includes & Cycle Detection"
 
 # ─── 6. Template & Slot Merging ──────────────────────────────────────────────
 echo "[TEST 6] Template & Slot Merging"
+rm -f slot_order.txt
 cat << 'EOF' > tpl.yml
 - name: template
-- spawn: echo "STEP_1" > $PWD/slot_order.txt
+- spawn: echo "STEP_1" > ./slot_order.txt
 - slot: true
-- spawn: echo "STEP_3" >> $PWD/slot_order.txt
+- spawn: echo "STEP_3" >> ./slot_order.txt
 EOF
 
 cat << 'EOF' > target_pkg.yml
 - name: target
-- spawn: echo "STEP_2" >> $PWD/slot_order.txt
+- spawn: echo "STEP_2" >> ./slot_order.txt
 EOF
 
 $TAU_BIN run tpl.yml target_pkg.yml --name slot_inst
@@ -246,7 +247,7 @@ echo "[TEST 10] Hot-Reloading of Manifest Files"
 $TAU_BIN stop hot_inst --kill 2>/dev/null || true
 sleep 0.5
 
-INSTANCES_DIR="/run/user/$USER/tau/instances"
+INSTANCES_DIR="/tmp/tau-$(id -u)/instances"
 if [ ! -d "$INSTANCES_DIR" ]; then
     INSTANCES_DIR="/run/user/$(id -u)/tau/instances"
 fi
@@ -264,7 +265,7 @@ cat << 'EOF' > hot_reload_manifest.yml
     name: hot_sleeper
 EOF
 
-$TAU_BIN run hot_reload_manifest.yml --name hot_inst --detach
+$TAU_BIN start hot_reload_manifest.yml --name hot_inst --detach
 sleep 1
 
 # Append new spawn to instance manifest file on disk
@@ -294,7 +295,7 @@ mkdir -p "$TAU_PATH/store/local_pkg_hash"
 mkdir -p "$TAU_PATH/manifests"
 echo "store_marker" > "$TAU_PATH/store/local_pkg_hash/ran"
 
-$TAU_STORE_BIN
+$TAU_BIN do-store
 
 if [ ! -d "$TAU_PATH/store/local_pkg_hash" ]; then
     echo "ERROR: Store GC purged local_ store directory"

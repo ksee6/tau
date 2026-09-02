@@ -36,6 +36,21 @@
 #ifndef TCP_QUEUE_SEQ
 #define TCP_QUEUE_SEQ 21
 #endif
+#ifndef TCP_REPAIR_OPTIONS
+#define TCP_REPAIR_OPTIONS 22
+#endif
+#ifndef TCP_NO_QUEUE
+#define TCP_NO_QUEUE 0
+#endif
+#ifndef TCP_RECV_QUEUE
+#define TCP_RECV_QUEUE 1
+#endif
+#ifndef TCP_SEND_QUEUE
+#define TCP_SEND_QUEUE 2
+#endif
+#ifndef TCP_QUEUES_NR
+#define TCP_QUEUES_NR 3
+#endif
 
 namespace Tau {
 
@@ -110,11 +125,8 @@ static void collectDescendantPids(pid_t rootPid, Array<pid_t> &outPids) {
 
 Array<pid_t> Snapshot::collectInstancePids(const InstanceState &state) {
     Array<pid_t> pids;
-    if (state.spawnPID > 0) {
-        collectDescendantPids(state.spawnPID, pids);
-    }
     for (size_t i = 0; i < state.spawns.length(); ++i) {
-        if (state.spawns[i].pid > 0) {
+        if (state.spawns[i].pid > 0 && state.spawns[i].pid != state.spawnPID) {
             bool found = false;
             for (size_t j = 0; j < pids.length(); ++j) {
                 if (pids[j] == state.spawns[i].pid) { found = true; break; }
@@ -390,7 +402,10 @@ String Snapshot::findMatching(const String &instanceDir, const String &targetTim
 bool Snapshot::take(const String &instanceDir,
                     const InstanceState &state,
                     bool isFreeze,
-                    String &outTimestamp) {
+                    String &outTimestamp,
+                    const String &targetSpawn,
+                    bool isSoft,
+                    bool wol) {
     String timestamp = generateTimestamp();
     outTimestamp = timestamp;
 
@@ -403,7 +418,19 @@ bool Snapshot::take(const String &instanceDir,
     Array<String> existing = list(instanceDir);
     String prevTimestamp;
     if (existing.length() > 0) {
-        prevTimestamp = existing[existing.length() - 1];
+        if (!targetSpawn.isEmpty()) {
+            for (long long idx = (long long)existing.length() - 1; idx >= 0; --idx) {
+                SnapshotInfo checkInfo;
+                if (load(instanceDir, existing[(size_t)idx], checkInfo)) {
+                    if (checkInfo.targetSpawn == targetSpawn || checkInfo.targetSpawn.isEmpty()) {
+                        prevTimestamp = existing[(size_t)idx];
+                        break;
+                    }
+                }
+            }
+        } else {
+            prevTimestamp = existing[existing.length() - 1];
+        }
     }
 
     SnapshotInfo prevInfo;
@@ -415,9 +442,20 @@ bool Snapshot::take(const String &instanceDir,
         }
     }
 
-    // Freeze instance processes during snapshot
-    bool cgroupFrozen = Cgroup::freeze(state.name, "", true);
-    Array<pid_t> pids = collectInstancePids(state);
+    // Freeze instance or target spawn processes during snapshot
+    bool cgroupFrozen = false;
+    Array<pid_t> pids;
+    if (!targetSpawn.isEmpty()) {
+        for (size_t j = 0; j < state.spawns.length(); ++j) {
+            if (state.spawns[j].name == targetSpawn && state.spawns[j].pid > 0) {
+                collectDescendantPids(state.spawns[j].pid, pids);
+            }
+        }
+    } else {
+        cgroupFrozen = Cgroup::freeze(state.name, "", true);
+        pids = collectInstancePids(state);
+    }
+
     for (size_t i = 0; i < pids.length(); ++i) {
         if (pids[i] > 0) ::kill(pids[i], SIGSTOP);
     }
@@ -429,6 +467,9 @@ bool Snapshot::take(const String &instanceDir,
     info.timestamp = timestamp;
     info.instanceName = state.name;
     info.manifestPath = state.manifestPath;
+    info.targetSpawn = targetSpawn;
+    info.isSoft = isSoft;
+    info.wol = wol;
     info.isDelta = !prevTimestamp.isEmpty();
     info.baseTimestamp = prevTimestamp.isEmpty() ? timestamp : prevTimestamp;
 
@@ -438,7 +479,7 @@ bool Snapshot::take(const String &instanceDir,
         pid_t pid = pids[i];
         if (pid <= 0) continue;
 
-        String spawnName;
+        String spawnName = targetSpawn;
         for (size_t j = 0; j < state.spawns.length(); ++j) {
             if (state.spawns[j].pid == pid) {
                 spawnName = state.spawns[j].name;
@@ -472,6 +513,9 @@ bool Snapshot::take(const String &instanceDir,
     yml += String("is_delta: ") + (info.isDelta ? "true" : "false") + "\n";
     yml += "base_timestamp: " + info.baseTimestamp + "\n";
     yml += "instance: " + info.instanceName + "\n";
+    if (!info.targetSpawn.isEmpty()) yml += "target_spawn: " + info.targetSpawn + "\n";
+    yml += String("is_soft: ") + (info.isSoft ? "true" : "false") + "\n";
+    yml += String("wol: ") + (info.wol ? "true" : "false") + "\n";
     yml += "manifest: " + info.manifestPath + "\n";
     yml += "processes:\n";
     for (size_t i = 0; i < info.processes.length(); ++i) {
@@ -542,6 +586,9 @@ bool Snapshot::load(const String &instanceDir,
     outInfo.isDelta = (yamlChildString(&root, "is_delta") == "true");
     outInfo.baseTimestamp = yamlChildString(&root, "base_timestamp");
     outInfo.instanceName = yamlChildString(&root, "instance");
+    outInfo.targetSpawn = yamlChildString(&root, "target_spawn");
+    outInfo.isSoft = (yamlChildString(&root, "is_soft") == "true");
+    outInfo.wol = (yamlChildString(&root, "wol") == "true");
     outInfo.manifestPath = yamlChildString(&root, "manifest");
 
     NodeBase *procsNode = root.get("processes");

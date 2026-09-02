@@ -52,14 +52,12 @@ cat << 'EOF' > test_manifest.yml
     - spawn: echo "Inside OR block after failure fallback"
 
 - waitexit:
-    - spawn:
-        command: echo "Background spawn in waitexit 1"
-        wait: false
-        name: bg1
-    - spawn:
-        command: echo "Background spawn in waitexit 2"
-        wait: false
-        name: bg2
+    - spawn: echo "Background spawn in waitexit 1"
+      wait: false
+      name: bg1
+    - spawn: echo "Background spawn in waitexit 2"
+      wait: false
+      name: bg2
 
 EOF
 
@@ -81,10 +79,9 @@ echo "Manifest execution OK!"
 echo "=== 5. Testing background detached run & tau ls / cat / stop ==="
 cat << 'EOF' > bg_manifest.yml
 - name: bg-instance
-- spawn:
-    command: sleep 30
-    wait: true
-    name: sleeper
+- spawn: sleep 30
+  wait: true
+  name: sleeper
 EOF
 
 $TAU_BIN run bg_manifest.yml --name bg_test --detach
@@ -100,7 +97,7 @@ $TAU_BIN ls bg_test
 echo "Stopping bg_test..."
 $TAU_BIN stop bg_test:sleeper --kill
 
-echo "=== 6. Testing tau-store ==="
+echo "=== 6. Testing tau do-store ==="
 mkdir -p /tmp/tau_store_test/manifests
 export TAU_PATH="/tmp/tau_store_test"
 
@@ -109,9 +106,9 @@ cat << 'EOF' > /tmp/tau_store_test/manifests/store_test.yml
 - mkdir: ./installed_marker
 EOF
 
-$TAU_STORE_BIN
+$TAU_BIN do-store
 if [ -d "/tmp/tau_store_test/store" ]; then
-    echo "tau-store created store dir successfully!"
+    echo "tau do-store created store dir successfully!"
 fi
 
 echo "=== ALL TESTS PASSED SUCCESSFULLY! ==="

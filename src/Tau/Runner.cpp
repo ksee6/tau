@@ -331,6 +331,14 @@ bool Runner::run(const DirectiveList &directives) {
         }
     }
 
+    if (!_opts.enterSlot.isEmpty()) {
+        String slotName = _opts.enterSlot;
+        _opts.enterSlot = "";
+        DEntry entryDir;
+        entryDir.name = slotName;
+        execEntry(entryDir);
+    }
+
     bool ok = true;
     for (size_t i = 0; i < directives.length(); ++i) {
         auto *d = directives[i];
@@ -376,6 +384,9 @@ bool Runner::run(const DirectiveList &directives) {
             case DirectiveKind::RegVar:
             case DirectiveKind::RallVar:   result = execVar      (*static_cast<DVarBase*>(d));   break;
             case DirectiveKind::NewVar:    result = execNewVar   (*static_cast<DNewVar*>(d));    break;
+            case DirectiveKind::ESlot:     result = execESlot    (*static_cast<DESlot*>(d));     break;
+            case DirectiveKind::NoESlot:   result = execNoESlot  (*static_cast<DNoESlot*>(d));   break;
+            case DirectiveKind::Entry:     result = execEntry    (*static_cast<DEntry*>(d));     break;
             case DirectiveKind::RmVar:     result = execRmVar    (*static_cast<DRmVar*>(d));     break;
             case DirectiveKind::Fail:      result = execFail     (*static_cast<DFail*>(d));      break;
             case DirectiveKind::Throw:     result = execThrow    (*static_cast<DThrow*>(d));     break;
@@ -722,6 +733,11 @@ ActiveSpawn *Runner::launchSpawn(const String &spawnName, const DSpawn &d, bool 
             }
 
             // Export current runner variables to child environment
+            if (!_opts.sourceManifestPath.isEmpty()) {
+                ::setenv("TAU_INSTANCE_MANIFEST", _opts.sourceManifestPath.c_str(), 1);
+            } else if (!_opts.manifestPath.isEmpty()) {
+                ::setenv("TAU_INSTANCE_MANIFEST", _opts.manifestPath.c_str(), 1);
+            }
             for (auto &entry : _vars) {
                 if (!entry.key.isEmpty() && !entry.value.isEmpty()) {
                     if (entry.key == "PATH" && _isoCtx.hasChrootd) continue;
@@ -833,6 +849,11 @@ ActiveSpawn *Runner::launchSpawn(const String &spawnName, const DSpawn &d, bool 
             }
 
             // Export current runner variables to child environment
+            if (!_opts.sourceManifestPath.isEmpty()) {
+                ::setenv("TAU_INSTANCE_MANIFEST", _opts.sourceManifestPath.c_str(), 1);
+            } else if (!_opts.manifestPath.isEmpty()) {
+                ::setenv("TAU_INSTANCE_MANIFEST", _opts.manifestPath.c_str(), 1);
+            }
             for (auto &entry : _vars) {
                 if (!entry.key.isEmpty() && !entry.value.isEmpty()) {
                     if (entry.key == "PATH" && _isoCtx.hasChrootd) continue;
@@ -2117,7 +2138,7 @@ bool Runner::execVar(const DVarBase &d) {
     for (size_t ki = 0; ki < keys.length(); ++ki) {
         const String &key = keys[ki];
         String *current = _vars.get(key);
-        String curVal   = current ? *current : String("");
+        String curVal   = current ? *current : interp(key);
 
         switch (d.op) {
             case VarOp::Assign: {
@@ -2239,6 +2260,305 @@ bool Runner::execFail(const DFail &d) {
 
 bool Runner::execThrow(const DThrow &d) {
     throw TauThrow{ interp(d.message) };
+}
+
+// ─── ESlot & Entry directives ──────────────────────────────────────────────────
+
+static pid_t getParentPidFromProc(pid_t pid) {
+    if (pid <= 1) return 0;
+    char statPath[64];
+    ::snprintf(statPath, sizeof(statPath), "/proc/%d/stat", (int)pid);
+    int fd = ::open(statPath, O_RDONLY);
+    if (fd < 0) return 0;
+    char buf[1024] = {};
+    ssize_t n = ::read(fd, buf, sizeof(buf) - 1);
+    ::close(fd);
+    if (n <= 0) return 0;
+    // Format: pid (comm) state ppid ...
+    char *closeParen = ::strrchr(buf, ')');
+    if (!closeParen) return 0;
+    pid_t ppid = 0;
+    if (::sscanf(closeParen + 2, "%*c %d", &ppid) == 1) {
+        return ppid;
+    }
+    return 0;
+}
+
+DESlot *Runner::findESlot(const String &name) {
+    // 1. Check local _activeESlots first (inside slots are always allowed)
+    for (size_t i = 0; i < _activeESlots.length(); ++i) {
+        auto *es = _activeESlots[i];
+        if (es && es->name == name) {
+            return es;
+        }
+    }
+
+    // If noeslot is active, filter outside eslot requests (from parents / instances / globals)
+    if (_noESlotEnabled) {
+        bool allowed = false;
+        for (size_t i = 0; i < _noESlotExceptions.length(); ++i) {
+            if (_noESlotExceptions[i] == name) {
+                allowed = true;
+                break;
+            }
+        }
+        if (!allowed) {
+            logInfo("tau/findESlot: outside eslot '", name, "' masked by noeslot directive");
+            return nullptr; // outside slot masked
+        }
+    }
+
+    // 2. Check TAU_INSTANCE_MANIFEST if set in environment by parent tau-instance
+    const char *envManifest = ::getenv("TAU_INSTANCE_MANIFEST");
+    if (envManifest && *envManifest && pathExists(envManifest)) {
+        Array<String> visited;
+        ParseError perr;
+        auto *pm = new ParsedManifest(Manifest::load(envManifest, visited, perr));
+        if (perr.ok) {
+            Manifest::resolveVariables(pm->directives, _vars);
+            for (auto *d : pm->directives) {
+                if (d && d->kind == DirectiveKind::ESlot) {
+                    auto *es = static_cast<DESlot*>(d);
+                    if (es->name == name) {
+                        _activeESlots.push(es);
+                        return es;
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Walk parent processes up to PID 1 to find any parent tau-instance
+    pid_t cur = ::getpid();
+    Array<pid_t> ancestors;
+    while (cur > 1) {
+        ancestors.push(cur);
+        pid_t parent = getParentPidFromProc(cur);
+        if (parent <= 1 || parent == cur) break;
+        cur = parent;
+
+        // Directly check cmdline of ancestor process for any manifest paths
+        char cmdlinePath[64];
+        ::snprintf(cmdlinePath, sizeof(cmdlinePath), "/proc/%d/cmdline", (int)cur);
+        int cfd = ::open(cmdlinePath, O_RDONLY);
+        if (cfd >= 0) {
+            char cbuf[4096] = {};
+            ssize_t cn = ::read(cfd, cbuf, sizeof(cbuf) - 1);
+            ::close(cfd);
+            if (cn > 0) {
+                // cmdline has null-separated args
+                ssize_t idx = 0;
+                while (idx < cn) {
+                    String arg(cbuf + idx);
+                    if (arg.isEmpty()) {
+                        idx++;
+                        continue;
+                    }
+                    idx += arg.length() + 1;
+                    if (arg.endsWith(".yml") || arg.endsWith(".yaml")) {
+                        if (pathExists(arg)) {
+                            Array<String> visited;
+                            ParseError perr;
+                            auto *pm = new ParsedManifest(Manifest::load(arg, visited, perr));
+                            if (perr.ok) {
+                                Manifest::resolveVariables(pm->directives, _vars);
+                                for (auto *d : pm->directives) {
+                                    if (d && d->kind == DirectiveKind::ESlot) {
+                                        auto *es = static_cast<DESlot*>(d);
+                                        if (es->name == name) {
+                                            _activeESlots.push(es);
+                                            return es;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Also check /proc/<pid>/environ for TAU_INSTANCE_MANIFEST
+        char envPath[64];
+        ::snprintf(envPath, sizeof(envPath), "/proc/%d/environ", (int)cur);
+        int efd = ::open(envPath, O_RDONLY);
+        if (efd >= 0) {
+            char ebuf[8192] = {};
+            ssize_t en = ::read(efd, ebuf, sizeof(ebuf) - 1);
+            ::close(efd);
+            if (en > 0) {
+                ssize_t eidx = 0;
+                while (eidx < en) {
+                    String ev(ebuf + eidx);
+                    if (ev.isEmpty()) {
+                        eidx++;
+                        continue;
+                    }
+                    eidx += ev.length() + 1;
+                    if (ev.startsWith("TAU_INSTANCE_MANIFEST=")) {
+                        String eMan = ev.substring(22);
+                        if (pathExists(eMan)) {
+                            Array<String> visited;
+                            ParseError perr;
+                            auto *pm = new ParsedManifest(Manifest::load(eMan, visited, perr));
+                            if (perr.ok) {
+                                Manifest::resolveVariables(pm->directives, _vars);
+                                for (auto *d : pm->directives) {
+                                    if (d && d->kind == DirectiveKind::ESlot) {
+                                        auto *es = static_cast<DESlot*>(d);
+                                        if (es->name == name) {
+                                            _activeESlots.push(es);
+                                            return es;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    String instRoot = Config::instancesPath();
+    DIR *id = ::opendir(instRoot.c_str());
+    if (id) {
+        struct dirent *ent;
+        while ((ent = ::readdir(id)) != nullptr) {
+            if (ent->d_name[0] == '.') continue;
+            String iname(ent->d_name);
+            String idir = instRoot + "/" + iname;
+            InstanceState st;
+            if (Instance::load(idir, st)) {
+                bool isAncestorInstance = false;
+                for (size_t ai = 0; ai < ancestors.length(); ++ai) {
+                    pid_t apid = ancestors[ai];
+                    if (st.spawnPID == apid) {
+                        isAncestorInstance = true;
+                        break;
+                    }
+                    for (size_t si = 0; si < st.spawns.length(); ++si) {
+                        if (st.spawns[si].pid == apid) {
+                            isAncestorInstance = true;
+                            break;
+                        }
+                    }
+                    if (isAncestorInstance) break;
+                }
+
+                if (isAncestorInstance) {
+                    String mPath = idir + "/instance.yml";
+                    if (!pathExists(mPath)) mPath = idir + "/manifest.yml";
+                    if (!pathExists(mPath) && !st.manifestPath.isEmpty()) mPath = st.manifestPath;
+                    if (pathExists(mPath)) {
+                        Array<String> visited;
+                        ParseError perr;
+                        auto *pm = new ParsedManifest(Manifest::load(mPath, visited, perr));
+                        if (perr.ok) {
+                            Manifest::resolveVariables(pm->directives, _vars);
+                            for (auto *d : pm->directives) {
+                                if (d && d->kind == DirectiveKind::ESlot) {
+                                    auto *es = static_cast<DESlot*>(d);
+                                    if (es->name == name) {
+                                        ::closedir(id);
+                                        _activeESlots.push(es);
+                                        return es;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        ::closedir(id);
+    }
+
+    // 4. Check global slots directories (TAU_PATH/slots and /var/tau/slots)
+    Config::init();
+    Array<String> slotDirs;
+    slotDirs.push(Config::slotsPath());
+    if (Config::slotsGlobalPath() != Config::slotsPath()) {
+        slotDirs.push(Config::slotsGlobalPath());
+    }
+
+    for (size_t di = 0; di < slotDirs.length(); ++di) {
+        String sdir = slotDirs[di];
+        String slotFile = sdir + "/" + name + ".yml";
+        if (pathExists(slotFile)) {
+            Array<String> visited;
+            ParseError perr;
+            ParsedManifest pm = Manifest::load(slotFile, visited, perr);
+            if (perr.ok) {
+                Manifest::resolveVariables(pm.directives, _vars);
+                for (size_t dii = 0; dii < pm.directives.length(); ++dii) {
+                    auto *d = pm.directives[dii];
+                    if (d && d->kind == DirectiveKind::ESlot) {
+                        auto *origEs = static_cast<DESlot*>(d);
+                        if (origEs->name == name) {
+                            auto *es = new DESlot();
+                            es->name = origEs->name;
+                            es->slot = origEs->slot;
+                            es->entry = Manifest::cloneDirectives(origEs->entry);
+                            es->escape = Manifest::cloneDirectives(origEs->escape);
+                            es->inject = Manifest::cloneDirectives(origEs->inject);
+                            _activeESlots.push(es);
+                            return es;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return nullptr;
+}
+
+bool Runner::execESlot(const DESlot &d) {
+    // Register eslot locally and globally across parents/children
+    _activeESlots.push(const_cast<DESlot *>(&d));
+    return true;
+}
+
+bool Runner::execNoESlot(const DNoESlot &d) {
+    _noESlotEnabled = d.enabled;
+    _noESlotExceptions = d.exceptions;
+    return true;
+}
+
+bool Runner::execEntry(const DEntry &d) {
+    String targetName = interp(d.name).trim();
+    if (targetName.isEmpty()) return true;
+
+    // Search for matching eslot in local, parents up process tree, or global
+    // (findESlot allows inside/local eslots and exceptions, while masking outside ones when noeslot is active)
+    DESlot *es = findESlot(targetName);
+    if (es) {
+        // Ensure all caller runner variables are synced to environment for child spawns
+        for (auto &entry : _vars) {
+            if (!entry.key.isEmpty() && !entry.value.isEmpty()) {
+                ::setenv(entry.key.c_str(), entry.value.c_str(), 1);
+            }
+        }
+        bool entryPassed = true;
+        if (es->entry.length() > 0) {
+            entryPassed = run(es->entry);
+        }
+        if (entryPassed && es->slot) {
+            if (d.inject.length() > 0) {
+                run(d.inject);
+            } else if (es->inject.length() > 0) {
+                run(es->inject);
+            }
+        } else {
+            if (es->escape.length() > 0) {
+                run(es->escape);
+            }
+        }
+        // Stops at first successful slot regardless of result
+        return true;
+    }
+    return true;
 }
 
 // ─── Packaging ────────────────────────────────────────────────────────────────
@@ -2366,8 +2686,8 @@ String Runner::resolvePath(const String &p) const {
         if (pathExists(current)) {
             char rbuf[4096];
             if (::realpath(current.c_str(), rbuf)) current = String(rbuf);
-        } else if (!_opts.manifestPath.isEmpty()) {
-            String mPath = _opts.manifestPath;
+        } else if (!_opts.sourceManifestPath.isEmpty() || !_opts.manifestPath.isEmpty()) {
+            String mPath = !_opts.sourceManifestPath.isEmpty() ? _opts.sourceManifestPath : _opts.manifestPath;
             char rbuf[4096];
             if (::realpath(mPath.c_str(), rbuf)) mPath = String(rbuf);
 
@@ -2399,6 +2719,7 @@ String Runner::resolvePath(const String &p) const {
         // Never prefix internal tau temp/store/system paths!
         if (!current.startsWith("/tmp/tau") &&
             !current.startsWith("/var/tau") &&
+            !current.startsWith("/.var/tau") &&
             !current.startsWith("/run/") &&
             !current.startsWith(_isoCtx.chrootPath + "/") &&
             current != _isoCtx.chrootPath) {

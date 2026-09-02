@@ -32,6 +32,7 @@ String SpawnState::statusString() const {
         case SpawnStatus::Exited:  return "exited";
         case SpawnStatus::Failed:  return "failed";
         case SpawnStatus::Stopped: return "stopped";
+        case SpawnStatus::Frozen:  return "frozen";
     }
     return "unknown";
 }
@@ -221,18 +222,13 @@ bool Instance::resolve(const String &spec, const String &instancesDir,
         return true;
     }
 
-    // 2. Check separators (':', '.', '/')
+    // 2. Check separators (':', '.')
     String instName, spawnName;
-    long long sep = -1;
-    for (size_t i = 0; i < spec.length(); ++i) {
-        char c = spec[i];
-        if (c == ':' || c == '.' || c == '/') {
-            sep = (long long)i;
-            break;
-        }
-    }
+    long long colon = rfind(spec, ':');
+    long long dot = rfind(spec, '.');
+    long long sep = colon >= 0 ? colon : dot;
 
-    if (sep >= 0) {
+    if (sep > 0) {
         instName  = spec.substring(0, (size_t)sep);
         spawnName = spec.substring((size_t)sep + 1);
     } else {
@@ -240,6 +236,14 @@ bool Instance::resolve(const String &spec, const String &instancesDir,
     }
 
     if (instName.isEmpty()) return false;
+
+    if (load(instName, state) || pathExists(instName + "/tau.sock") || pathExists(instName + "/instance.yml") || pathExists(instName + "/state.yml")) {
+        char r[4096];
+        if (::realpath(instName.c_str(), r)) outInstance = String(r);
+        else outInstance = instName;
+        outSpawn = spawnName.isEmpty() ? (state.firstSpawn() ? state.firstSpawn()->name : String("0")) : spawnName;
+        return true;
+    }
 
     if (!load(instancesDir + "/" + instName, state)) return false;
 

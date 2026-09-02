@@ -53,6 +53,62 @@ void SpawnProcess::onSIGTERM(int) {
     _termRequested = true;
 }
 
+struct CpuSample {
+    unsigned long long utime = 0;
+    unsigned long long stime = 0;
+    unsigned long long timestamp = 0;
+};
+static Map<pid_t, CpuSample> g_cpuSamples;
+
+static double getProcessCpuPercentage(pid_t pid) {
+    if (pid <= 0) return 0.0;
+    char path[64];
+    ::snprintf(path, sizeof(path), "/proc/%d/stat", (int)pid);
+    int fd = ::open(path, O_RDONLY);
+    if (fd < 0) return 0.0;
+    char buf[1024];
+    ssize_t n = ::read(fd, buf, sizeof(buf) - 1);
+    ::close(fd);
+    if (n <= 0) return 0.0;
+    buf[n] = '\0';
+
+    char *paren = ::strrchr(buf, ')');
+    if (!paren) return 0.0;
+    unsigned long long utime = 0, stime = 0;
+    int count = 0;
+    char *tok = ::strtok(paren + 1, " ");
+    while (tok) {
+        ++count;
+        if (count == 12) utime = (unsigned long long)::strtoull(tok, nullptr, 10);
+        else if (count == 13) { stime = (unsigned long long)::strtoull(tok, nullptr, 10); break; }
+        tok = ::strtok(nullptr, " ");
+    }
+
+    struct timespec ts;
+    ::clock_gettime(CLOCK_MONOTONIC, &ts);
+    unsigned long long nowMs = (unsigned long long)ts.tv_sec * 1000ULL + (unsigned long long)ts.tv_nsec / 1000000ULL;
+
+    double cpuPercent = 0.0;
+    if (g_cpuSamples.has(pid)) {
+        CpuSample &prev = g_cpuSamples[pid];
+        unsigned long long deltaTicks = (utime + stime) >= (prev.utime + prev.stime)
+            ? (utime + stime) - (prev.utime + prev.stime) : 0;
+        unsigned long long deltaMs = nowMs > prev.timestamp ? nowMs - prev.timestamp : 1;
+        long clk_tck = sysconf(_SC_CLK_TCK);
+        if (clk_tck <= 0) clk_tck = 100;
+        double deltaSecs = (double)deltaMs / 1000.0;
+        if (deltaSecs > 0.001) {
+            cpuPercent = ((double)deltaTicks / (double)clk_tck) / deltaSecs * 100.0;
+        }
+    }
+    CpuSample s;
+    s.utime = utime;
+    s.stime = stime;
+    s.timestamp = nowMs;
+    g_cpuSamples[pid] = s;
+    return cpuPercent;
+}
+
 // ─── Constructor / Destructor ─────────────────────────────────────────────────
 
 SpawnProcess::SpawnProcess(const SpawnOptions &opts)
@@ -211,15 +267,65 @@ IPCServer::Handlers SpawnProcess::makeHandlers() {
         return Instance::toYAML(_state);
     };
 
-    h.snapshot = [this](bool isFreeze) -> String {
+    h.snapshot = [this](const String &spawnName, bool isFreeze, bool isSoft, bool wol) -> String {
         String ts;
-        bool ok = Snapshot::take(_opts.instanceDir, _state, isFreeze, ts);
+        bool ok = Snapshot::take(_opts.instanceDir, _state, isFreeze, ts, spawnName, isSoft, wol);
         if (ok && isFreeze) {
-            _state.status = InstanceStatus::Frozen;
-            persistState();
-            _termRequested = true;
+            if (isSoft || (!spawnName.isEmpty() && spawnName != "all")) {
+                if (_runner) {
+                    for (auto *sp : _runner->activeSpawns()) {
+                        if (spawnName.isEmpty() || spawnName == "all" || sp->name == spawnName) {
+                            sp->isFrozen = true;
+                            sp->isSoftFrozen = true;
+                            sp->autofreezeWOL = wol;
+                            if (sp->pid > 0) ::kill(sp->pid, SIGSTOP);
+                        }
+                    }
+                }
+                for (size_t i = 0; i < _state.spawns.length(); ++i) {
+                    if (spawnName.isEmpty() || spawnName == "all" || _state.spawns[i].name == spawnName) {
+                        _state.spawns[i].status = SpawnStatus::Frozen;
+                    }
+                }
+                persistState();
+                Monitor::broadcast("FREEZE", _opts.instanceName, _startupTime, "spawn=" + (spawnName.isEmpty() ? "all" : spawnName) + " mode=soft");
+            } else {
+                _state.status = InstanceStatus::Frozen;
+                persistState();
+                _termRequested = true;
+            }
         }
         return ok ? ts : "";
+    };
+
+    h.wake = [this](const String &spawnName) -> bool {
+        bool anyWoken = false;
+        if (_runner) {
+            for (auto *sp : _runner->activeSpawns()) {
+                if (spawnName.isEmpty() || spawnName == "all" || sp->name == spawnName) {
+                    if (sp->isFrozen) {
+                        if (sp->pid > 0) ::kill(sp->pid, SIGCONT);
+                        sp->isFrozen = false;
+                        sp->isSoftFrozen = false;
+                        sp->idleSeconds = 0.0;
+                        anyWoken = true;
+                    }
+                }
+            }
+        }
+        for (size_t i = 0; i < _state.spawns.length(); ++i) {
+            if (spawnName.isEmpty() || spawnName == "all" || _state.spawns[i].name == spawnName) {
+                if (_state.spawns[i].status == SpawnStatus::Frozen) {
+                    _state.spawns[i].status = SpawnStatus::Running;
+                    anyWoken = true;
+                }
+            }
+        }
+        if (anyWoken) {
+            persistState();
+            Monitor::broadcast("WAKE", _opts.instanceName, _startupTime, "spawn=" + (spawnName.isEmpty() ? "all" : spawnName));
+        }
+        return anyWoken;
     };
 
     return h;
@@ -274,6 +380,53 @@ void SpawnProcess::reapChildren() {
 
                 persistState();
                 break;
+            }
+        }
+    }
+}
+
+// ─── evaluateAutofreeze ───────────────────────────────────────────────────────
+
+void SpawnProcess::evaluateAutofreeze() {
+    if (!_runner) return;
+    struct timespec ts;
+    ::clock_gettime(CLOCK_MONOTONIC, &ts);
+    double nowSecs = (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+
+    static double lastEvalSecs = 0.0;
+    if (lastEvalSecs == 0.0) {
+        lastEvalSecs = nowSecs;
+        return;
+    }
+    double elapsed = nowSecs - lastEvalSecs;
+    if (elapsed < 0.05) return;
+    lastEvalSecs = nowSecs;
+
+    for (auto *sp : _runner->activeSpawns()) {
+        if (sp->waited || sp->pid <= 0) continue;
+        if (!sp->hasAutofreeze) continue;
+
+        if (!sp->isFrozen) {
+            double cpuPct = getProcessCpuPercentage(sp->pid);
+            if (cpuPct < sp->autofreezeCPU) {
+                sp->idleSeconds += elapsed;
+                if (sp->idleSeconds >= sp->autofreezeTimer) {
+                    String snapTs;
+                    Snapshot::take(_opts.instanceDir, _state, true, snapTs, sp->name, true, sp->autofreezeWOL);
+                    ::kill(sp->pid, SIGSTOP);
+                    sp->isFrozen = true;
+                    sp->isSoftFrozen = true;
+                    for (size_t si = 0; si < _state.spawns.length(); ++si) {
+                        if (_state.spawns[si].name == sp->name) {
+                            _state.spawns[si].status = SpawnStatus::Frozen;
+                            break;
+                        }
+                    }
+                    persistState();
+                    Monitor::broadcast("FREEZE", _opts.instanceName, _startupTime, "spawn=" + sp->name + " reason=autofreeze");
+                }
+            } else {
+                sp->idleSeconds = 0.0;
             }
         }
     }
@@ -366,6 +519,7 @@ int SpawnProcess::run() {
     runOpts.instanceDir   = _opts.instanceDir;
     runOpts.manifestPath  = _opts.manifestPath;
     runOpts.sourceManifestPath = _opts.sourceManifestPath;
+    runOpts.enterSlot = _opts.enterSlot;
     runOpts.detach = _opts.detach;
     runOpts.cols   = _opts.cols;
     runOpts.rows   = _opts.rows;
@@ -415,6 +569,7 @@ int SpawnProcess::run() {
         setupNetlink();
         processNetlinkEvents();
         reapChildren();
+        evaluateAutofreeze();
         checkReload();
     };
 
@@ -532,6 +687,7 @@ int SpawnProcess::run() {
     Map<String, String> runnerVars = _runner->currentEnv();
     String allArgsStr;
     for (size_t ai = 0; ai < _opts.args.length(); ++ai) {
+        runnerVars[intStr((int)ai)] = _opts.args[ai];
         runnerVars[intStr((int)(ai + 1))] = _opts.args[ai];
         if (ai > 0) allArgsStr += " ";
         allArgsStr += _opts.args[ai];
@@ -641,6 +797,7 @@ int SpawnProcess::run() {
 
 
         _ipc.update();
+        evaluateAutofreeze();
         checkReload();
 
         if (_termRequested) {
@@ -694,21 +851,21 @@ void SpawnProcess::checkReload() {
 #else
         curNsec = (long long)mst.st_mtim.tv_sec * 1000000000LL + mst.st_mtim.tv_nsec;
 #endif
-        if (curNsec > 0 && _manifestMTimeNsec > 0 && curNsec > (_manifestMTimeNsec + 50000000LL)) {
+        if (curNsec > 0 && (_manifestMTimeNsec == 0 || curNsec > _manifestMTimeNsec)) {
             fileToReload = _watchedEntryPath;
             _manifestMTimeNsec = curNsec;
         }
     }
 
-    // Also check instanceDir/instance.yml if different
+    // Also check instanceDir/instance.yml if different or if modified
     String instYml = _opts.instanceDir + "/instance.yml";
-    if (fileToReload.isEmpty() && instYml != _watchedEntryPath && ::stat(instYml.c_str(), &mst) == 0) {
+    if (fileToReload.isEmpty() && ::stat(instYml.c_str(), &mst) == 0) {
 #if defined(__APPLE__)
         long long instNsec = (long long)mst.st_mtimespec.tv_sec * 1000000000LL + mst.st_mtimespec.tv_nsec;
 #else
         long long instNsec = (long long)mst.st_mtim.tv_sec * 1000000000LL + mst.st_mtim.tv_nsec;
 #endif
-        if (instNsec > 0 && _instYamlMTimeNsec > 0 && instNsec > (_instYamlMTimeNsec + 50000000LL)) {
+        if (instNsec > 0 && (_instYamlMTimeNsec == 0 || instNsec > _instYamlMTimeNsec)) {
             fileToReload = instYml;
             _instYamlMTimeNsec = instNsec;
         }

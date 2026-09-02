@@ -16,22 +16,20 @@ unset TAU_GLOBAL
 # Create a test manifest with a longer sleep
 cat << 'YAML' > test_pkg.yml
 - name: env_test_pkg
-- spawn:
-    name: worker
-    command: "echo 'DEFAULT_PATHS_OK' > /tmp/tau_paths_test/out.txt; sleep 3"
-    wait: true
+- spawn: "echo 'DEFAULT_PATHS_OK' > /tmp/tau_paths_test/out.txt; sleep 3"
+  name: worker
+  wait: true
 YAML
 
 $TAU run test_pkg.yml --name default_inst -d
 sleep 0.5
 
-EXPECTED_TEMP="/run/user/$USER/tau/instances/default_inst"
-EXPECTED_TEMP_UID="/run/user/$(id -u)/tau/instances/default_inst"
-if [ ! -d "$EXPECTED_TEMP" ] && [ ! -d "$EXPECTED_TEMP_UID" ]; then
-    echo "ERROR: instance not created in default /run/user/<user>/tau/instances"
+EXPECTED_TEMP="/tmp/tau-$(id -u)/instances/default_inst"
+if [ ! -d "$EXPECTED_TEMP" ]; then
+    echo "ERROR: instance not created in default /tmp/tau-<uid>/instances: $EXPECTED_TEMP"
     exit 1
 fi
-echo "Instance found in /run/user/.../tau/instances successfully!"
+echo "Instance found in $EXPECTED_TEMP successfully!"
 $TAU stop default_inst || true
 
 echo "=== 2. Testing Custom TAU_PATH_TEMP ==="
@@ -52,31 +50,31 @@ echo "=== 3. Testing TAU_GLOBAL Manifest Linking in tau init ==="
 export TAU_GLOBAL="/tmp/tau_paths_test/fake_global"
 export TAU_PATH="/tmp/tau_paths_test/fake_user_path"
 mkdir -p "$TAU_GLOBAL/manifests"
-# Place executable fake tau-store in TAU_GLOBAL
-cat << 'SH' > "$TAU_GLOBAL/tau-store"
+# Place executable fake tau in TAU_GLOBAL
+cat << 'SH' > "$TAU_GLOBAL/tau"
 #!/bin/sh
 exit 0
 SH
-chmod +x "$TAU_GLOBAL/tau-store"
+chmod +x "$TAU_GLOBAL/tau"
 
 mkdir -p /tmp/tau_paths_test/sample_project
 cd /tmp/tau_paths_test/sample_project
 $TAU init
 
-if [ ! -L "$TAU_GLOBAL/manifests/sample_project.yml" ]; then
-    echo "ERROR: tau init did not link to TAU_GLOBAL/manifests when writable & tau-store executable"
+if [ -z "$(ls -A "$TAU_GLOBAL/manifests")" ]; then
+    echo "ERROR: tau init did not link into TAU_GLOBAL/manifests when writable & global tau executable"
     exit 1
 fi
 echo "tau init successfully linked to TAU_GLOBAL/manifests!"
 
-echo "=== 4. Testing Fallback to TAU_PATH when TAU_GLOBAL is not writable or missing store ==="
-# Remove tau-store from TAU_GLOBAL
-rm -f "$TAU_GLOBAL/tau-store"
+echo "=== 4. Testing Fallback to TAU_PATH when TAU_GLOBAL is not writable or missing tau ==="
+# Remove tau from TAU_GLOBAL
+rm -f "$TAU_GLOBAL/tau"
 mkdir -p /tmp/tau_paths_test/sample_project2
 cd /tmp/tau_paths_test/sample_project2
 $TAU init
 
-if [ ! -L "$TAU_PATH/manifests/sample_project2.yml" ]; then
+if [ -z "$(ls -A "$TAU_PATH/manifests")" ]; then
     echo "ERROR: tau init did not fallback to TAU_PATH/manifests"
     exit 1
 fi

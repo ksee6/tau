@@ -58,6 +58,9 @@ struct SnapshotInfo {
     bool                    isDelta = false;
     String                  baseTimestamp;
     String                  instanceName;
+    String                  targetSpawn;
+    bool                    isSoft = false;
+    bool                    wol = false;
     String                  manifestPath;
     Array<ProcessMemoryDump> processes;
     Array<SocketInfo>       sockets;
@@ -66,7 +69,7 @@ struct SnapshotInfo {
 class Snapshot {
 public:
     /**
-     * @brief Take a full or delta snapshot of an instance.
+     * @brief Take a full or delta snapshot of an instance or specific spawn.
      *
      * Saves to <instanceDir>/snapshots/<timestamp>/
      *
@@ -74,12 +77,18 @@ public:
      * @param state        Current InstanceState.
      * @param isFreeze     Whether this snapshot is part of a freeze operation.
      * @param outTimestamp Generated timestamp on success.
+     * @param targetSpawn  Optional specific spawn/VM to snapshot (empty = all).
+     * @param isSoft       Whether this is a soft freeze (keep supervisor alive).
+     * @param wol          Whether Wake on LAN is enabled for this freeze.
      * @return true on success.
      */
     static bool take(const String &instanceDir,
                      const InstanceState &state,
                      bool isFreeze,
-                     String &outTimestamp);
+                     String &outTimestamp,
+                     const String &targetSpawn = "",
+                     bool isSoft = false,
+                     bool wol = false);
 
     /**
      * @brief List available snapshot timestamps in an instance directory.

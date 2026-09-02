@@ -60,6 +60,11 @@ struct IsolationContext {
     bool      hasCPUSet       = false;
     String    cpusetCPUs;
 
+    bool      hasAutofreeze   = false;
+    bool      autofreezeWOL   = true;
+    double    autofreezeCPU   = 5.0;
+    double    autofreezeTimer = 20.0;
+
     bool      hasCgroupLimits = false;
 };
 

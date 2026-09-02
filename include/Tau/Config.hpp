@@ -17,8 +17,8 @@ static constexpr const char *ENV_TAU_PATH_TEMP = "TAU_PATH_TEMP";
 static constexpr const char *ENV_TAU_GLOBAL    = "TAU_GLOBAL";
 
 // ─── Default paths ────────────────────────────────────────────────────────────
-static constexpr const char *DEFAULT_TAU_GLOBAL = "/var/tau";
-static constexpr const char *DEFAULT_TAU_PATH   = "~/.cache/tau";
+static constexpr const char *DEFAULT_TAU_GLOBAL = "/.var/tau";
+static constexpr const char *DEFAULT_TAU_PATH   = "~/.var/tau";
 
 // ─── Ring-buffer size for spawn scrollback ────────────────────────────────────
 static constexpr size_t RING_BUFFER_SIZE = 1u * 1024u * 1024u; // 1 MB per stream
@@ -46,13 +46,13 @@ public:
      */
     static void init();
 
-    /** @brief Primary tau root (~/.cache/tau for user, TAU_GLOBAL for root). */
+    /** @brief Primary tau root (~/.var/tau for user, TAU_GLOBAL for root). */
     static const String &tauPath();
 
-    /** @brief Temporary tau root (/run/user/<user>/tau for user, /run/tau for root). */
+    /** @brief Temporary tau root (/tmp/tau-<uid> for user, /tmp/tau for root). */
     static const String &tauPathTemp();
 
-    /** @brief Global tau root (/var/tau). */
+    /** @brief Global tau root (/.var/tau). */
     static const String &tauGlobal();
 
     /** @brief The store subdirectory (under TAU_PATH). */
@@ -60,6 +60,18 @@ public:
 
     /** @brief The manifests subdirectory (under TAU_PATH). */
     static String manifestsPath();
+
+    /** @brief The lists subdirectory (under TAU_PATH/lists). */
+    static String listsPath(const String &listName = "");
+
+    /** @brief The lists temporary state/counter subdirectory (under TAU_PATH_TEMP/lists). */
+    static String listTempPath(const String &listName = "");
+
+    /** @brief The registered global eslots subdirectory (under TAU_PATH/slots). */
+    static String slotsPath();
+
+    /** @brief The registered global eslots subdirectory in TAU_GLOBAL (under /var/tau/slots). */
+    static String slotsGlobalPath();
 
     /** @brief The instances subdirectory (under TAU_PATH_TEMP). */
     static String instancesPath();

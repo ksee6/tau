@@ -31,13 +31,6 @@ static String nodeStr(const NodeBase *node) {
     if (auto *n = dynamic_cast<const Node<int> *>(node)) return intStr(n->value);
     if (auto *n = dynamic_cast<const Node<double> *>(node)) return doubleStr(n->value);
     if (auto *n = dynamic_cast<const Node<bool> *>(node)) return n->value ? "true" : "false";
-
-    for (size_t i = 0; i < node->size(); ++i) {
-        const NodeBase *child = (*node)[i];
-        if (!child) continue;
-        String res = nodeStr(child);
-        if (!res.isEmpty()) return res;
-    }
     return "";
 }
 
@@ -55,19 +48,13 @@ static NodeBase *getDictNode(NodeBase *node, const String &key) {
         if (!item) continue;
         if (!item->getName().isEmpty() && item->getName() == key) return item;
 
-        if (item->size() >= 2 && (*item)[0] && (*item)[0]->getName() == key) {
-            return (*item)[1];
-        }
-        if (item->size() == 1 && (*item)[0] && (*item)[0]->getName() == key) {
-            return item;
-        }
-    }
+        NodeBase *subDirect = item->get(key);
+        if (subDirect) return subDirect;
 
-    for (size_t i = 0; i < node->size(); ++i) {
-        NodeBase *item = (*node)[i];
-        if (!item) continue;
-        NodeBase *found = getDictNode(item, key);
-        if (found) return found;
+        for (size_t k = 0; k < item->size(); ++k) {
+            NodeBase *sub = (*item)[k];
+            if (sub && !sub->getName().isEmpty() && sub->getName() == key) return sub;
+        }
     }
 
     return nullptr;
@@ -88,23 +75,15 @@ String Manifest::childString(NodeBase *node, const String &key, const String &de
         return val.isEmpty() ? def : val;
     }
 
-    for (size_t i = 0; i < child->size(); ++i) {
-        NodeBase *c = (*child)[i];
-        if (c && !c->getName().isEmpty()) {
-            if (c->getName() == "https" || c->getName() == "http") {
+    if (val.isEmpty() && child->size() > 0) {
+        for (size_t i = 0; i < child->size(); ++i) {
+            NodeBase *c = (*child)[i];
+            if (c && (c->getName() == "https" || c->getName() == "http")) {
                 String proto = c->getName();
                 String rest = nodeStr(c);
                 while (rest.startsWith("\"")) rest = rest.substring(1);
                 while (rest.endsWith("\"")) rest = rest.substring(0, rest.length() - 1);
                 return proto + "://" + rest;
-            } else if (c->getName() != key) {
-                String sub = nodeStr(c);
-                if (sub.isEmpty() || sub == "true" || sub == "false") {
-                    val = c->getName();
-                } else {
-                    val = c->getName() + ":" + sub;
-                }
-                break;
             }
         }
     }
@@ -112,7 +91,6 @@ String Manifest::childString(NodeBase *node, const String &key, const String &de
     while (val.startsWith("\"")) val = val.substring(1);
     while (val.endsWith("\"")) val = val.substring(0, val.length() - 1);
     return val.isEmpty() ? def : val;
-
 }
 
 
@@ -195,11 +173,6 @@ static NodeBase *findNamedNode(NodeBase *node) {
         NodeBase *child = (*node)[i];
         if (child && !child->getName().isEmpty()) return child;
     }
-
-    for (size_t i = 0; i < node->size(); ++i) {
-        NodeBase *found = findNamedNode((*node)[i]);
-        if (found) return found;
-    }
     return nullptr;
 }
 
@@ -211,20 +184,19 @@ Directive *Manifest::nodeToDirective(NodeBase *node,
                                      ParseError &err) {
     if (!node) return nullptr;
 
+    NodeBase *origNode = node;
     String key = node->getName();
-    if (key.isEmpty()) {
-        NodeBase *named = findNamedNode(node);
-        if (named) {
-            key = named->getName();
-            node = named;
+    if (key.isEmpty() && node->size() > 0) {
+        for (size_t i = 0; i < node->size(); ++i) {
+            NodeBase *child = (*node)[i];
+            if (child && !child->getName().isEmpty()) {
+                key = child->getName();
+                node = child;
+                break;
+            }
         }
     }
     if (key.isEmpty()) {
-        logError("tau/nodeToDirective: key is empty! nodeName='", node->getName(), "' nodeSize=", intStr(node->size()));
-        for (size_t di = 0; di < node->size(); ++di) {
-            NodeBase *ch = (*node)[di];
-            logError("  child[", intStr(di), "] name='", ch ? ch->getName() : "<null>", "' size=", intStr(ch ? ch->size() : 0), " str='", nodeStr(ch), "'");
-        }
         return nullptr;
     }
 
@@ -235,7 +207,81 @@ Directive *Manifest::nodeToDirective(NodeBase *node,
     // ── wait ──────────────────────────────────────────────────────────────────
     if (key == "wait") {
         auto *d = new DWait();
-        d->seconds = parseDuration(nodeStr(node));
+        d->isGlobal = childBool(node, "global", false);
+        if (node->size() > 0 && getDictNode(node, "targets") != nullptr) {
+            NodeBase *tn = getDictNode(node, "targets");
+            for (size_t i = 0; i < tn->size(); ++i) {
+                String s = nodeStr((*tn)[i]).trim();
+                if (!s.isEmpty()) d->targets.push(s);
+            }
+        } else if (node->size() > 0 && (nodeStr(node).isEmpty() || nodeStr(node) == "[]")) {
+            for (size_t i = 0; i < node->size(); ++i) {
+                String s = nodeStr((*node)[i]).trim();
+                while (s.startsWith("[") && s.endsWith("]") && s.length() >= 2) {
+                    s = s.substring(1, s.length() - 1).trim();
+                }
+                if (!s.isEmpty() && s != "true" && s != "false" && s != "[]") {
+                    Array<String> parts = s.split(",");
+                    for (size_t pi = 0; pi < parts.length(); ++pi) {
+                        String pt = parts[pi].trim();
+                        if (!pt.isEmpty()) d->targets.push(pt);
+                    }
+                }
+            }
+        } else {
+            String val = nodeStr(node).trim();
+            while (val.startsWith("[") && val.endsWith("]") && val.length() >= 2) {
+                val = val.substring(1, val.length() - 1).trim();
+            }
+            if (val.find(",") >= 0) {
+                Array<String> parts = val.split(",");
+                for (size_t pi = 0; pi < parts.length(); ++pi) {
+                    String pt = parts[pi].trim();
+                    if (!pt.isEmpty()) d->targets.push(pt);
+                }
+            } else if (!val.isEmpty()) {
+                // Check if it is a pure duration (e.g. "1.5s", "200ms", "5m")
+                bool isDur = false;
+                if (val.endsWith("ms") || val.endsWith("s") || val.endsWith("m") || val.endsWith("h")) {
+                    char *endp = nullptr;
+                    (void)::strtod(val.c_str(), &endp);
+                    if (endp && (::strcmp(endp, "ms") == 0 || ::strcmp(endp, "s") == 0 || ::strcmp(endp, "m") == 0 || ::strcmp(endp, "h") == 0)) {
+                        isDur = true;
+                    }
+                }
+                if (isDur) {
+                    d->seconds = parseDuration(val);
+                } else {
+                    d->targets.push(val);
+                }
+            }
+        }
+        return d;
+    }
+
+    // ── trigger ───────────────────────────────────────────────────────────────
+    if (key == "trigger") {
+        auto *d = new DTrigger();
+        d->name = nodeStr(node).trim();
+        if (d->name.isEmpty()) d->name = childString(node, "name").trim();
+        return d;
+    }
+
+    // ── nowait ────────────────────────────────────────────────────────────────
+    if (key == "nowait") {
+        auto *d = new DNoWait();
+        NodeBase *target = getDictNode(node, "entry");
+        if (!target) target = node;
+        d->children = nodeListToDirectives(target, basePath, visited, err);
+        return d;
+    }
+
+    // ── waitall ───────────────────────────────────────────────────────────────
+    if (key == "waitall") {
+        auto *d = new DWaitAll();
+        NodeBase *target = getDictNode(node, "entry");
+        if (!target) target = node;
+        d->children = nodeListToDirectives(target, basePath, visited, err);
         return d;
     }
 
@@ -298,19 +344,21 @@ Directive *Manifest::nodeToDirective(NodeBase *node,
     // ── spawn ─────────────────────────────────────────────────────────────────
     if (key == "spawn") {
         auto *d = new DSpawn();
-        if (node->size() == 0 || getDictNode(node, "command") == nullptr) {
-            d->command = nodeStr(node);
-            d->waitForExit = true;
-        } else {
-            d->command     = childString(node, "command");
-            d->waitForExit = childBool(node, "wait", true);
-            d->name        = childString(node, "name");
-            String pidStr  = childString(node, "pid", "");
-            if (!pidStr.isEmpty()) d->pid = (pid_t)parseLong(pidStr);
-            String ecStr   = childString(node, "exitcode", "");
-            if (ecStr.isEmpty()) ecStr = childString(node, "exit_code", "");
-            if (!ecStr.isEmpty()) d->exitCode = (int)parseLong(ecStr);
+        d->command = nodeStr(node).trim();
+        if (d->command.isEmpty() || (node->size() > 0 && getDictNode(node, "command") != nullptr)) {
+            String nestedCmd = childString(node, "command").trim();
+            if (!nestedCmd.isEmpty()) d->command = nestedCmd;
         }
+        while (d->command.startsWith("\"") && d->command.endsWith("\"") && d->command.length() >= 2) {
+            d->command = d->command.substring(1, d->command.length() - 1);
+        }
+        d->waitForExit = childBool(node, "wait", true);
+        d->name        = childString(node, "name");
+        String pidStr  = childString(node, "pid", "");
+        if (!pidStr.isEmpty()) d->pid = (pid_t)parseLong(pidStr);
+        String ecStr   = childString(node, "exitcode", "");
+        if (ecStr.isEmpty()) ecStr = childString(node, "exit_code", "");
+        if (!ecStr.isEmpty()) d->exitCode = (int)parseLong(ecStr);
         return d;
     }
 
@@ -372,25 +420,183 @@ Directive *Manifest::nodeToDirective(NodeBase *node,
         return d;
     }
 
-    if (key == "chroot") {
+    if (key == "autofreeze" || key == "auto_freeze" || key == "scale_to_zero") {
+        auto *d = new DAutofreeze();
+        if (node->size() > 0) {
+            String wolStr = childString(node, "wol");
+            if (!wolStr.isEmpty()) d->wol = (wolStr != "false" && wolStr != "0" && wolStr != "off");
+            String cpuStr = childString(node, "cpu_threshold");
+            if (cpuStr.isEmpty()) cpuStr = childString(node, "cpu");
+            if (!cpuStr.isEmpty()) {
+                String ctrim = cpuStr.trim();
+                if (ctrim.endsWith("%")) ctrim = ctrim.substring(0, ctrim.length() - 1).trim();
+                d->cpuThreshold = (double)parseLong(ctrim);
+            }
+            String timerStr = childString(node, "timer");
+            if (timerStr.isEmpty()) timerStr = childString(node, "idle");
+            if (timerStr.isEmpty()) timerStr = childString(node, "timeout");
+            if (!timerStr.isEmpty()) {
+                d->rawTimer = timerStr;
+                String t = timerStr.trim();
+                if (t.endsWith("ms")) {
+                    d->timerSeconds = (double)parseLong(t.substring(0, t.length() - 2)) / 1000.0;
+                } else if (t.endsWith("s")) {
+                    d->timerSeconds = (double)parseLong(t.substring(0, t.length() - 1));
+                } else if (t.endsWith("m")) {
+                    d->timerSeconds = (double)parseLong(t.substring(0, t.length() - 1)) * 60.0;
+                } else if (t.endsWith("h")) {
+                    d->timerSeconds = (double)parseLong(t.substring(0, t.length() - 1)) * 3600.0;
+                } else {
+                    long long v = parseLong(t);
+                    if (v > 0) d->timerSeconds = (double)v;
+                }
+            }
+            String enStr = childString(node, "enabled");
+            if (!enStr.isEmpty()) d->enabled = (enStr != "false" && enStr != "0" && enStr != "off");
+        } else {
+            String val = nodeStr(node).trim();
+            if (val == "false" || val == "0" || val == "off") {
+                d->enabled = false;
+            } else if (val == "true" || val == "1" || val == "on") {
+                d->enabled = true;
+            } else if (!val.isEmpty()) {
+                d->rawTimer = val;
+                String t = val;
+                if (t.endsWith("ms")) {
+                    d->timerSeconds = (double)parseLong(t.substring(0, t.length() - 2)) / 1000.0;
+                } else if (t.endsWith("s")) {
+                    d->timerSeconds = (double)parseLong(t.substring(0, t.length() - 1));
+                } else if (t.endsWith("m")) {
+                    d->timerSeconds = (double)parseLong(t.substring(0, t.length() - 1)) * 60.0;
+                } else if (t.endsWith("h")) {
+                    d->timerSeconds = (double)parseLong(t.substring(0, t.length() - 1)) * 3600.0;
+                } else {
+                    long long v = parseLong(t);
+                    if (v > 0) d->timerSeconds = (double)v;
+                }
+                d->enabled = true;
+            }
+        }
+        return d;
+    }
+
+    if (key == "chroot" || key == "root") {
         auto *d = new DChroot();
         d->path = nodeStr(node);
         return d;
     }
 
-    if (key == "isolate") {
+    if (key == "isolate" || key == "unshare") {
         auto *d = new DIsolate();
-        String val = nodeStr(node);
-        d->enable = (val != "false" && val != "0");
+        String val = nodeStr(node).trim();
+        if (val.isEmpty()) val = childString(node, "unshare", childString(node, "isolate", "true"));
+        d->enable = (val != "false" && val != "0" && val != "off");
         return d;
     }
 
+    if (key == "noread") {
+        auto *d = new DNoRead();
+        Array<String> items;
+        if (node->size() > 0 && (nodeStr(node).isEmpty() || nodeStr(node) == "[]")) {
+            for (size_t i = 0; i < node->size(); ++i) {
+                String s = nodeStr((*node)[i]).trim();
+                if (!s.isEmpty()) items.push(s);
+            }
+        } else {
+            String s = nodeStr(node).trim();
+            if (!s.isEmpty()) items.push(s);
+        }
+        d->paths = items;
+        return d;
+    }
+
+    if (key == "nowrite") {
+        auto *d = new DNoWrite();
+        Array<String> items;
+        if (node->size() > 0 && (nodeStr(node).isEmpty() || nodeStr(node) == "[]")) {
+            for (size_t i = 0; i < node->size(); ++i) {
+                String s = nodeStr((*node)[i]).trim();
+                if (!s.isEmpty()) items.push(s);
+            }
+        } else {
+            String s = nodeStr(node).trim();
+            if (!s.isEmpty()) items.push(s);
+        }
+        d->paths = items;
+        return d;
+    }
+
+    if (key == "noexecute" || key == "noexec") {
+        auto *d = new DNoExecute();
+        Array<String> items;
+        if (node->size() > 0 && (nodeStr(node).isEmpty() || nodeStr(node) == "[]")) {
+            for (size_t i = 0; i < node->size(); ++i) {
+                String s = nodeStr((*node)[i]).trim();
+                if (!s.isEmpty()) items.push(s);
+            }
+        } else {
+            String s = nodeStr(node).trim();
+            if (!s.isEmpty()) items.push(s);
+        }
+        d->paths = items;
+        return d;
+    }
+
+    if (key == "nomount") {
+        auto *d = new DNoMount();
+        Array<String> items;
+        if (node->size() > 0 && (nodeStr(node).isEmpty() || nodeStr(node) == "[]")) {
+            for (size_t i = 0; i < node->size(); ++i) {
+                String s = nodeStr((*node)[i]).trim();
+                if (!s.isEmpty()) items.push(s);
+            }
+        } else {
+            String s = nodeStr(node).trim();
+            if (!s.isEmpty()) items.push(s);
+        }
+        d->paths = items;
+        return d;
+    }
+
+    if (key == "nowatch") {
+        auto *d = new DNoWatch();
+        Array<String> items;
+        if (node->size() > 0 && (nodeStr(node).isEmpty() || nodeStr(node) == "[]")) {
+            for (size_t i = 0; i < node->size(); ++i) {
+                String s = nodeStr((*node)[i]).trim();
+                if (!s.isEmpty()) items.push(s);
+            }
+        } else {
+            String s = nodeStr(node).trim();
+            if (!s.isEmpty()) items.push(s);
+        }
+        d->paths = items;
+        return d;
+    }
 
     if (key == "veth") {
         auto *d = new DVeth();
-        d->hostName = childString(node, "host");
-        if (d->hostName.isEmpty()) d->hostName = childString(node, "name");
-        d->peerName = childString(node, "peer");
+        d->source = childString(node, "source");
+        if (d->source.isEmpty()) d->source = childString(node, "host");
+        if (d->source.isEmpty()) d->source = childString(node, "name");
+
+        d->target = childString(node, "target");
+        if (d->target.isEmpty()) d->target = childString(node, "peer");
+
+        d->sip = childString(node, "sip");
+        if (d->sip.isEmpty()) d->sip = childString(node, "source-ip");
+        if (d->sip.isEmpty()) d->sip = childString(node, "source_ip");
+        if (d->sip.isEmpty()) d->sip = childString(node, "host-ip");
+        if (d->sip.isEmpty()) d->sip = childString(node, "host_ip");
+
+        d->ip = childString(node, "ip");
+        if (d->ip.isEmpty()) d->ip = childString(node, "peer-ip");
+        if (d->ip.isEmpty()) d->ip = childString(node, "peer_ip");
+        if (d->ip.isEmpty()) d->ip = childString(node, "target-ip");
+        if (d->ip.isEmpty()) d->ip = childString(node, "target_ip");
+
+        d->hostName = d->source;
+        d->peerName = d->target;
         return d;
     }
 
@@ -400,7 +606,7 @@ Directive *Manifest::nodeToDirective(NodeBase *node,
         return d;
     }
 
-    if (key == "newnet") {
+    if (key == "newnet" || key == "nolinks") {
         auto *d = new DNewNet();
         if (node->size() > 0) {
             for (size_t i = 0; i < node->size(); ++i) {
@@ -429,6 +635,49 @@ Directive *Manifest::nodeToDirective(NodeBase *node,
         return d;
     }
 
+    if (key == "route") {
+        auto *d = new DRoute();
+        String dest = nodeStr(node).trim();
+        if (dest.isEmpty() || dest.startsWith("{") || dest.startsWith("[")) {
+            dest = childString(node, "route", "default");
+            if (dest.isEmpty() || dest == "true") dest = childString(node, "destination", "default");
+        }
+        d->destination = dest;
+
+        NodeBase *viaNode = getDictNode(node, "via");
+        if (viaNode) {
+            if (viaNode->size() > 0 && (nodeStr(viaNode).isEmpty() || nodeStr(viaNode).startsWith("[") || nodeStr(viaNode).startsWith("{"))) {
+                for (size_t i = 0; i < viaNode->size(); ++i) {
+                    NodeBase *vn = (*viaNode)[i];
+                    if (!vn) continue;
+                    RouteHop hop;
+                    if (vn->size() == 0 || getDictNode(vn, "ip") == nullptr) {
+                        String s = nodeStr(vn).trim();
+                        if (!s.isEmpty()) {
+                            hop.ip = s;
+                            d->hops.push(hop);
+                        }
+                    } else {
+                        hop.ip = childString(vn, "ip");
+                        hop.link = childString(vn, "link");
+                        if (hop.link.isEmpty()) hop.link = childString(vn, "dev");
+                        String wStr = childString(vn, "weight", "1");
+                        hop.weight = !wStr.isEmpty() ? (int)parseLong(wStr) : 1;
+                        d->hops.push(hop);
+                    }
+                }
+            } else {
+                String viaStr = nodeStr(viaNode).trim();
+                if (!viaStr.isEmpty()) {
+                    RouteHop hop;
+                    hop.ip = viaStr;
+                    d->hops.push(hop);
+                }
+            }
+        }
+        return d;
+    }
+
     if (key == "forward") {
         auto *d = new DForward();
         d->target     = childString(node, "target");
@@ -436,6 +685,7 @@ Directive *Manifest::nodeToDirective(NodeBase *node,
         d->port       = childString(node, "port");
         d->sourcePort = childString(node, "source-port");
         String sip    = childString(node, "source-ip");
+        if (sip.isEmpty()) sip = childString(node, "sip");
         if (!sip.isEmpty()) d->sourceIP = sip;
         d->ip         = childString(node, "ip");
         String proto  = childString(node, "protocol");
@@ -716,9 +966,18 @@ Directive *Manifest::nodeToDirective(NodeBase *node,
             for (size_t i = 0; i < node->size(); ++i) {
                 NodeBase *c = (*node)[i];
                 if (c && !c->getName().isEmpty()) {
-                    d->key = c->getName();
-                    d->value = nodeStr(c);
-                    d->op = VarOp::Assign;
+                    String fullExpr = c->getName() + " " + nodeStr(c);
+                    String k, v;
+                    VarOp op = parseVarOp(fullExpr, k, v);
+                    if (op != VarOp::Assign || fullExpr.find("=") >= 0) {
+                        d->key = k;
+                        d->value = v;
+                        d->op = op;
+                    } else {
+                        d->key = c->getName();
+                        d->value = nodeStr(c);
+                        d->op = VarOp::Assign;
+                    }
                     return d;
                 }
             }
@@ -780,6 +1039,88 @@ Directive *Manifest::nodeToDirective(NodeBase *node,
     // ── slot ──────────────────────────────────────────────────────────────────
     if (key == "slot") return new DSlot();
 
+    // ── eslot ─────────────────────────────────────────────────────────────────
+    if (key == "eslot") {
+        auto *d = new DESlot();
+        d->name = nodeStr(node).trim();
+        if (d->name.isEmpty()) d->name = childString(node, "name").trim();
+        if (d->name.isEmpty()) d->name = childString(origNode, "eslot").trim();
+        d->slot = childBool(node, "slot", false);
+        if (!d->slot) d->slot = childBool(origNode, "slot", false);
+
+        NodeBase *entryNode = node->get("entry");
+        if (!entryNode && getDictNode(node, "entry")) entryNode = getDictNode(node, "entry");
+        if (!entryNode && origNode->get("entry")) entryNode = origNode->get("entry");
+        if (!entryNode && getDictNode(origNode, "entry")) entryNode = getDictNode(origNode, "entry");
+        if (entryNode) d->entry = nodeListToDirectives(entryNode, basePath, visited, err);
+
+        NodeBase *escNode = node->get("escape");
+        if (!escNode && getDictNode(node, "escape")) escNode = getDictNode(node, "escape");
+        if (!escNode && origNode->get("escape")) escNode = origNode->get("escape");
+        if (!escNode && getDictNode(origNode, "escape")) escNode = getDictNode(origNode, "escape");
+        if (escNode) d->escape = nodeListToDirectives(escNode, basePath, visited, err);
+
+        NodeBase *injNode = node->get("inject");
+        if (!injNode && getDictNode(node, "inject")) injNode = getDictNode(node, "inject");
+        if (!injNode && origNode->get("inject")) injNode = origNode->get("inject");
+        if (!injNode && getDictNode(origNode, "inject")) injNode = getDictNode(origNode, "inject");
+        if (injNode) d->inject = nodeListToDirectives(injNode, basePath, visited, err);
+        return d;
+    }
+
+    // ── noeslot ───────────────────────────────────────────────────────────────
+    if (key == "noeslot" || key == "no_eslot") {
+        String val = nodeStr(node).trim();
+        // If false or 0 or off, noeslot is ignored (no-op)
+        if (val == "false" || val == "0" || val == "no" || val == "off") {
+            return nullptr;
+        }
+        auto *d = new DNoESlot();
+        d->enabled = true;
+        if (val == "true" || val == "1" || val == "yes" || val == "on") {
+            // d->exceptions is empty, meaning all outside eslots are masked
+        } else if (node->size() > 0 && (val.isEmpty() || val == "[]")) {
+            for (size_t i = 0; i < node->size(); ++i) {
+                String s = nodeStr((*node)[i]).trim();
+                while (s.startsWith("[") && s.endsWith("]") && s.length() >= 2) {
+                    s = s.substring(1, s.length() - 1).trim();
+                }
+                if (!s.isEmpty() && s != "true" && s != "false" && s != "[]") {
+                    d->exceptions.push(s);
+                }
+            }
+        } else if (!val.isEmpty()) {
+            while (val.startsWith("[") && val.endsWith("]") && val.length() >= 2) {
+                val = val.substring(1, val.length() - 1).trim();
+            }
+            if (!val.isEmpty() && val != "true" && val != "false" && val != "[]" && val != "{}") {
+                Array<String> parts = val.split(",");
+                for (size_t i = 0; i < parts.length(); ++i) {
+                    String t = parts[i].trim();
+                    if (!t.isEmpty() && t != "true" && t != "false" && t != "[]") {
+                        d->exceptions.push(t);
+                    }
+                }
+            }
+        }
+        return d;
+    }
+
+    // ── entry / enter ────────────────────────────────────────────────────────
+    if (key == "entry" || key == "enter") {
+        auto *d = new DEntry();
+        d->name = nodeStr(node).trim();
+        if (d->name.isEmpty()) d->name = childString(node, "name").trim();
+        if (d->name.isEmpty()) d->name = childString(origNode, "entry").trim();
+        if (d->name.isEmpty()) d->name = childString(origNode, "enter").trim();
+        NodeBase *injNode = node->get("inject");
+        if (!injNode && getDictNode(node, "inject")) injNode = getDictNode(node, "inject");
+        if (!injNode && origNode->get("inject")) injNode = origNode->get("inject");
+        if (!injNode && getDictNode(origNode, "inject")) injNode = getDictNode(origNode, "inject");
+        if (injNode) d->inject = nodeListToDirectives(injNode, basePath, visited, err);
+        return d;
+    }
+
     // ── bin ───────────────────────────────────────────────────────────────────
     if (key == "bin") {
         auto *d = new DBin();
@@ -794,6 +1135,9 @@ Directive *Manifest::nodeToDirective(NodeBase *node,
     if (key == "bindir") {
         auto *d = new DBinDir();
         d->path = nodeStr(node);
+        if (!d->path.isEmpty() && d->path[0] != '/' && !basePath.isEmpty()) {
+            d->path = basePath + "/" + d->path;
+        }
         return d;
     }
 
@@ -829,9 +1173,18 @@ DirectiveList Manifest::nodeListToDirectives(NodeBase *list,
                 NodeBase *c = (*vNode)[k];
                 if (c && !c->getName().isEmpty()) {
                     DVarBase *d = (vKey == "regvar") ? (DVarBase*)new DRegVar() : (vKey == "rallvar") ? (DVarBase*)new DRallVar() : (DVarBase*)new DVar();
-                    d->key = c->getName();
-                    d->value = nodeStr(c);
-                    d->op = VarOp::Assign;
+                    String fullExpr = c->getName() + " " + nodeStr(c);
+                    String kStr, vStr;
+                    VarOp op = parseVarOp(fullExpr, kStr, vStr);
+                    if (op != VarOp::Assign || fullExpr.find("=") >= 0) {
+                        d->key = kStr;
+                        d->value = vStr;
+                        d->op = op;
+                    } else {
+                        d->key = c->getName();
+                        d->value = nodeStr(c);
+                        d->op = VarOp::Assign;
+                    }
                     result.push(d);
                 }
             }
@@ -942,7 +1295,7 @@ DirectiveList Manifest::cloneDirectives(const DirectiveList &list) {
 static void injectIntoSlot(DirectiveList &base, DirectiveList &child) {
     int slotIdx = -1;
     for (size_t i = 0; i < base.length(); ++i) {
-        if (dynamic_cast<DSlot *>(base[i])) {
+        if (base[i] && base[i]->kind == DirectiveKind::Slot) {
             slotIdx = (int)i;
             break;
         }
@@ -985,6 +1338,17 @@ DirectiveList Manifest::applySlots(Array<ParsedManifest *> &templates,
     final_.directives.clear();
 
     injectIntoSlot(current, finalChunk);
+
+    // Clean up any remaining un-injected DSlot directives
+    for (size_t i = 0; i < current.length(); ) {
+        if (current[i] && current[i]->kind == DirectiveKind::Slot) {
+            delete current[i];
+            current.splice(i, 1);
+        } else {
+            ++i;
+        }
+    }
+
     return current;
 }
 
@@ -998,23 +1362,24 @@ String Manifest::interpolate(const String &s, Map<String, String> &vars) {
         if (s[i] == '$' && i + 1 < len) {
             size_t j = i + 1;
             while (j < len && (::isalnum(s[j]) || s[j] == '_')) ++j;
-                String varName = s.substring(i + 1, j);
-                const String *val = vars.get(varName);
-                if (val) {
+            String varName = s.substring(i + 1, j);
+            const String *val = vars.get(varName);
+            if (val && !val->isEmpty()) {
+                result += *val;
+            } else {
+                char *ev = ::getenv(varName.c_str());
+                if (ev && *ev) {
+                    String eStr(ev);
+                    vars[varName] = eStr;
+                    result += eStr;
+                } else if (val) {
                     result += *val;
                 } else {
-                    char *ev = ::getenv(varName.c_str());
-                    if (ev && *ev) {
-                        String eStr(ev);
-                        vars[varName] = eStr;
-                        result += eStr;
-                    } else {
-                        result += "$" + varName;
-                    }
+                    result += "$" + varName;
                 }
-                i = j;
-                continue;
-
+            }
+            i = j;
+            continue;
         } else if (s[i] == '%' && i + 1 < len) {
             size_t j = i + 1;
             while (j < len && (::isalnum(s[j]) || s[j] == '_' || s[j] == '-')) {
@@ -1091,7 +1456,6 @@ void Manifest::resolveVariables(DirectiveList &directives, Map<String, String> &
             }
             case DirectiveKind::Spawn: {
                 auto *sp = static_cast<DSpawn *>(d);
-                sp->command = interpolate(sp->command, vars);
                 if (!sp->name.isEmpty()) sp->name = interpolate(sp->name, vars);
                 break;
             }
@@ -1172,6 +1536,7 @@ void Manifest::resolveVariables(DirectiveList &directives, Map<String, String> &
                 }
                 break;
             }
+            case DirectiveKind::Autofreeze: break;
             case DirectiveKind::Chroot: {
                 auto *c = static_cast<DChroot *>(d);
                 c->path = interpolate(c->path, vars);
@@ -1184,8 +1549,48 @@ void Manifest::resolveVariables(DirectiveList &directives, Map<String, String> &
             }
             case DirectiveKind::Veth: {
                 auto *v = static_cast<DVeth *>(d);
-                v->hostName = interpolate(v->hostName, vars);
-                v->peerName = interpolate(v->peerName, vars);
+                if (!v->source.isEmpty()) v->source = interpolate(v->source, vars);
+                if (!v->target.isEmpty()) v->target = interpolate(v->target, vars);
+                if (!v->hostName.isEmpty()) v->hostName = interpolate(v->hostName, vars);
+                if (!v->peerName.isEmpty()) v->peerName = interpolate(v->peerName, vars);
+                if (v->source.isEmpty()) v->source = v->hostName;
+                if (v->target.isEmpty()) v->target = v->peerName;
+                v->hostName = v->source;
+                v->peerName = v->target;
+                if (!v->sip.isEmpty()) v->sip = interpolate(v->sip, vars);
+                if (!v->ip.isEmpty()) v->ip = interpolate(v->ip, vars);
+                break;
+            }
+            case DirectiveKind::Route: {
+                auto *r = static_cast<DRoute *>(d);
+                r->destination = interpolate(r->destination, vars);
+                for (size_t hi = 0; hi < r->hops.length(); ++hi) {
+                    if (!r->hops[hi].ip.isEmpty()) r->hops[hi].ip = interpolate(r->hops[hi].ip, vars);
+                    if (!r->hops[hi].link.isEmpty()) r->hops[hi].link = interpolate(r->hops[hi].link, vars);
+                }
+                break;
+            }
+            case DirectiveKind::Trigger: {
+                auto *t = static_cast<DTrigger *>(d);
+                t->name = interpolate(t->name, vars);
+                break;
+            }
+            case DirectiveKind::Wait: {
+                auto *w = static_cast<DWait *>(d);
+                for (size_t wi = 0; wi < w->targets.length(); ++wi) {
+                    w->targets[wi] = interpolate(w->targets[wi], vars);
+                }
+                break;
+            }
+            case DirectiveKind::NoRead:
+            case DirectiveKind::NoWrite:
+            case DirectiveKind::NoExecute:
+            case DirectiveKind::NoMount:
+            case DirectiveKind::NoWatch: {
+                auto *pr = static_cast<DPathRestriction *>(d);
+                for (size_t pi = 0; pi < pr->paths.length(); ++pi) {
+                    pr->paths[pi] = interpolate(pr->paths[pi], vars);
+                }
                 break;
             }
             case DirectiveKind::NewNet: {
@@ -1314,8 +1719,10 @@ void Manifest::resolveVariables(DirectiveList &directives, Map<String, String> &
                 }
                 break;
             }
-            case DirectiveKind::Var: {
-                auto *v = static_cast<DVar *>(d);
+            case DirectiveKind::Var:
+            case DirectiveKind::RegVar:
+            case DirectiveKind::RallVar: {
+                auto *v = static_cast<DVarBase *>(d);
                 v->key = interpolate(v->key, vars);
                 v->value = interpolate(v->value, vars);
                 if (!v->key.isEmpty() && v->op == VarOp::Assign) {
@@ -1331,6 +1738,37 @@ void Manifest::resolveVariables(DirectiveList &directives, Map<String, String> &
                 break;
             }
 
+            case DirectiveKind::NoWait: {
+                auto *nw = static_cast<DNoWait *>(d);
+                resolveVariables(nw->children, vars);
+                break;
+            }
+            case DirectiveKind::WaitAll: {
+                auto *wa = static_cast<DWaitAll *>(d);
+                resolveVariables(wa->children, vars);
+                break;
+            }
+            case DirectiveKind::ESlot: {
+                auto *es = static_cast<DESlot *>(d);
+                es->name = interpolate(es->name, vars);
+                resolveVariables(es->entry, vars);
+                resolveVariables(es->escape, vars);
+                resolveVariables(es->inject, vars);
+                break;
+            }
+            case DirectiveKind::NoESlot: {
+                auto *nes = static_cast<DNoESlot *>(d);
+                for (size_t i = 0; i < nes->exceptions.length(); ++i) {
+                    nes->exceptions[i] = interpolate(nes->exceptions[i], vars);
+                }
+                break;
+            }
+            case DirectiveKind::Entry: {
+                auto *en = static_cast<DEntry *>(d);
+                en->name = interpolate(en->name, vars);
+                resolveVariables(en->inject, vars);
+                break;
+            }
             case DirectiveKind::Bin: {
                 auto *b = static_cast<DBin *>(d);
                 b->name = interpolate(b->name, vars);
@@ -1359,11 +1797,6 @@ String Manifest::toYAML(const DirectiveList &directives, int indent) {
     for (auto *d : directives) {
         if (!d) continue;
         switch (d->kind) {
-            case DirectiveKind::Wait: {
-                auto *v = static_cast<DWait*>(d);
-                out += pad + "- wait: " + doubleStr(v->seconds) + "s\n";
-                break;
-            }
             case DirectiveKind::WaitExit: {
                 auto *v = static_cast<DWaitExit*>(d);
                 out += pad + "- waitexit:\n";
@@ -1388,15 +1821,19 @@ String Manifest::toYAML(const DirectiveList &directives, int indent) {
 
             case DirectiveKind::Spawn: {
                 auto *v = static_cast<DSpawn*>(d);
-                out += pad + "- spawn:\n";
                 String cmdEscaped = v->command.replace("\"", "\\\"");
-                out += pad + "    command: \"" + cmdEscaped + "\"\n";
-                out += pad + "    wait: " + (v->waitForExit ? "true\n" : "false\n");
-                if (!v->name.isEmpty()) out += pad + "    name: " + v->name + "\n";
-                if (v->exitCode >= 0) {
-                    out += pad + "    exitcode: " + intStr(v->exitCode) + "\n";
-                } else if (v->pid > 0) {
-                    out += pad + "    pid: " + intStr(v->pid) + "\n";
+                if (v->waitForExit && v->name.isEmpty() && v->exitCode < 0 && v->pid <= 0) {
+                    out += pad + "- spawn: \"" + cmdEscaped + "\"\n";
+                } else {
+                    out += pad + "- spawn:\n";
+                    out += pad + "    command: \"" + cmdEscaped + "\"\n";
+                    out += pad + "    wait: " + (v->waitForExit ? "true\n" : "false\n");
+                    if (!v->name.isEmpty()) out += pad + "    name: " + v->name + "\n";
+                    if (v->exitCode >= 0) {
+                        out += pad + "    exitcode: " + intStr(v->exitCode) + "\n";
+                    } else if (v->pid > 0) {
+                        out += pad + "    pid: " + intStr(v->pid) + "\n";
+                    }
                 }
                 break;
             }
@@ -1420,6 +1857,15 @@ String Manifest::toYAML(const DirectiveList &directives, int indent) {
                 if (v->quotaMax >= 0) out += pad + "    max: "   + intStr(v->quotaMax) + "\n";
                 break;
             }
+            case DirectiveKind::Autofreeze: {
+                auto *v = static_cast<DAutofreeze*>(d);
+                out += pad + "- autofreeze:\n";
+                out += pad + "    wol: " + (v->wol ? "true\n" : "false\n");
+                out += pad + "    cpu_threshold: " + intStr((long long)v->cpuThreshold) + "%\n";
+                out += pad + "    timer: " + v->rawTimer + "\n";
+                if (!v->enabled) out += pad + "    enabled: false\n";
+                break;
+            }
             case DirectiveKind::Chroot: {
                 auto *v = static_cast<DChroot*>(d);
                 out += pad + "- chroot: " + v->path + "\n";
@@ -1431,11 +1877,98 @@ String Manifest::toYAML(const DirectiveList &directives, int indent) {
                 break;
             }
 
+            case DirectiveKind::Wait: {
+                auto *v = static_cast<DWait*>(d);
+                if (v->seconds > 0) {
+                    out += pad + "- wait: " + doubleStr(v->seconds) + "s\n";
+                } else if (v->targets.length() == 1) {
+                    out += pad + "- wait: " + v->targets[0] + "\n";
+                } else if (v->targets.length() > 1) {
+                    out += pad + "- wait: [";
+                    for (size_t ti = 0; ti < v->targets.length(); ++ti) {
+                        if (ti > 0) out += ", ";
+                        out += v->targets[ti];
+                    }
+                    out += "]\n";
+                } else {
+                    out += pad + "- wait: 0s\n";
+                }
+                break;
+            }
+            case DirectiveKind::Trigger: {
+                auto *v = static_cast<DTrigger*>(d);
+                out += pad + "- trigger: " + v->name + "\n";
+                break;
+            }
+            case DirectiveKind::NoRead: {
+                auto *v = static_cast<DNoRead*>(d);
+                if (v->paths.length() == 1) out += pad + "- noread: " + v->paths[0] + "\n";
+                else {
+                    out += pad + "- noread:\n";
+                    for (size_t pi = 0; pi < v->paths.length(); ++pi) out += pad + "    - " + v->paths[pi] + "\n";
+                }
+                break;
+            }
+            case DirectiveKind::NoWrite: {
+                auto *v = static_cast<DNoWrite*>(d);
+                if (v->paths.length() == 1) out += pad + "- nowrite: " + v->paths[0] + "\n";
+                else {
+                    out += pad + "- nowrite:\n";
+                    for (size_t pi = 0; pi < v->paths.length(); ++pi) out += pad + "    - " + v->paths[pi] + "\n";
+                }
+                break;
+            }
+            case DirectiveKind::NoExecute: {
+                auto *v = static_cast<DNoExecute*>(d);
+                if (v->paths.length() == 1) out += pad + "- noexecute: " + v->paths[0] + "\n";
+                else {
+                    out += pad + "- noexecute:\n";
+                    for (size_t pi = 0; pi < v->paths.length(); ++pi) out += pad + "    - " + v->paths[pi] + "\n";
+                }
+                break;
+            }
+            case DirectiveKind::NoMount: {
+                auto *v = static_cast<DNoMount*>(d);
+                if (v->paths.length() == 1) out += pad + "- nomount: " + v->paths[0] + "\n";
+                else {
+                    out += pad + "- nomount:\n";
+                    for (size_t pi = 0; pi < v->paths.length(); ++pi) out += pad + "    - " + v->paths[pi] + "\n";
+                }
+                break;
+            }
+            case DirectiveKind::NoWatch: {
+                auto *v = static_cast<DNoWatch*>(d);
+                if (v->paths.length() == 1) out += pad + "- nowatch: " + v->paths[0] + "\n";
+                else {
+                    out += pad + "- nowatch:\n";
+                    for (size_t pi = 0; pi < v->paths.length(); ++pi) out += pad + "    - " + v->paths[pi] + "\n";
+                }
+                break;
+            }
+            case DirectiveKind::Route: {
+                auto *v = static_cast<DRoute*>(d);
+                out += pad + "- route: " + v->destination + "\n";
+                if (v->hops.length() == 1 && v->hops[0].link.isEmpty() && v->hops[0].weight == 1) {
+                    out += pad + "  via: " + v->hops[0].ip + "\n";
+                } else if (v->hops.length() > 0) {
+                    out += pad + "  via:\n";
+                    for (size_t hi = 0; hi < v->hops.length(); ++hi) {
+                        out += pad + "    - ip: " + v->hops[hi].ip + "\n";
+                        if (!v->hops[hi].link.isEmpty()) out += pad + "      link: " + v->hops[hi].link + "\n";
+                        if (v->hops[hi].weight > 1) out += pad + "      weight: " + intStr(v->hops[hi].weight) + "\n";
+                    }
+                }
+                break;
+            }
             case DirectiveKind::Veth: {
                 auto *v = static_cast<DVeth*>(d);
                 out += pad + "- veth:\n";
-                out += pad + "    name: " + v->hostName + "\n";
-                out += pad + "    peer: " + v->peerName + "\n";
+                String src = !v->source.isEmpty() ? v->source : v->hostName;
+                String tgt = !v->target.isEmpty() ? v->target : v->peerName;
+                out += pad + "    source: " + src + "\n";
+                if (!v->sip.isEmpty()) out += pad + "    sip: " + v->sip + "\n";
+                out += pad + "    target: " + tgt + "\n";
+                if (!v->ip.isEmpty())  out += pad + "    ip: " + v->ip + "\n";
                 break;
             }
             case DirectiveKind::IP: {
@@ -1489,7 +2022,7 @@ String Manifest::toYAML(const DirectiveList &directives, int indent) {
                 String brTarget = !v->target.isEmpty() ? v->target : v->attach;
                 out += pad + "    source: " + brName + "\n";
                 if (!brTarget.isEmpty())   out += pad + "    target: " + brTarget + "\n";
-                if (!v->address.isEmpty()) out += pad + "    address: " + v->address + "\n";
+                if (!v->address.isEmpty()) out += pad + "    ip: " + v->address + "\n";
                 break;
             }
 
@@ -1724,8 +2257,61 @@ String Manifest::toYAML(const DirectiveList &directives, int indent) {
                 out += pad + "- languages: " + v->value + "\n";
                 break;
             }
+            case DirectiveKind::NoWait: {
+                auto *v = static_cast<DNoWait*>(d);
+                out += pad + "- nowait:\n";
+                out += pad + "    entry:\n";
+                out += toYAML(v->children, indent + 8);
+                break;
+            }
+            case DirectiveKind::WaitAll: {
+                auto *v = static_cast<DWaitAll*>(d);
+                out += pad + "- waitall:\n";
+                out += pad + "    entry:\n";
+                out += toYAML(v->children, indent + 8);
+                break;
+            }
             case DirectiveKind::Slot: {
                 out += pad + "- slot: true\n";
+                break;
+            }
+            case DirectiveKind::ESlot: {
+                auto *v = static_cast<DESlot*>(d);
+                out += pad + "- eslot: " + v->name + "\n";
+                out += pad + "  slot: " + (v->slot ? "true" : "false") + "\n";
+                if (v->entry.length() > 0) {
+                    out += pad + "  entry:\n";
+                    out += toYAML(v->entry, indent + 4);
+                }
+                if (v->escape.length() > 0) {
+                    out += pad + "  escape:\n";
+                    out += toYAML(v->escape, indent + 4);
+                }
+                break;
+            }
+            case DirectiveKind::NoESlot: {
+                auto *v = static_cast<DNoESlot*>(d);
+                if (!v->enabled) {
+                    out += pad + "- noeslot: false\n";
+                } else if (v->exceptions.length() == 0) {
+                    out += pad + "- noeslot: true\n";
+                } else if (v->exceptions.length() == 1) {
+                    out += pad + "- noeslot: " + v->exceptions[0] + "\n";
+                } else {
+                    out += pad + "- noeslot:\n";
+                    for (size_t i = 0; i < v->exceptions.length(); ++i) {
+                        out += pad + "    - " + v->exceptions[i] + "\n";
+                    }
+                }
+                break;
+            }
+            case DirectiveKind::Entry: {
+                auto *v = static_cast<DEntry*>(d);
+                out += pad + "- entry: " + v->name + "\n";
+                if (v->inject.length() > 0) {
+                    out += pad + "  inject:\n";
+                    out += toYAML(v->inject, indent + 4);
+                }
                 break;
             }
             case DirectiveKind::Bin: {

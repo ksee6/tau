@@ -57,6 +57,7 @@ struct SpawnOptions {
     bool copyYaml     = true;          ///< Copy last yaml to instance dir (default: true)
     bool watch        = true;          ///< Watch last yaml for changes (default: true)
     String headDir;                    ///< Custom instance directory path
+    String enterSlot;                  ///< Optional eslot name to enter (--enter <eslot-name>)
 
     bool attachStdin  = true;          ///< Forward stdin to first spawn (non-detach)
     bool detach       = false;         ///< Become a background daemon immediately
@@ -134,6 +135,9 @@ private:
 
     /** @brief Drain _sigPipe; reap any zombie children. */
     void reapChildren();
+
+    /** @brief Evaluate CPU usage and idle countdown for autofreeze spawns. */
+    void evaluateAutofreeze();
 
     /** @brief Save instance.yml after any state change. */
     void persistState();

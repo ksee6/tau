@@ -6,6 +6,7 @@
 #include <Tau/Config.hpp>
 #include <Tau/Manifest.hpp>
 #include <Tau/Store.hpp>
+#include <Tau/Spawn.hpp>
 #include <Tau/IPC.hpp>
 #include <Tau/Instance.hpp>
 #include <Tau/Monitor.hpp>
@@ -35,6 +36,8 @@
 using namespace Terminal;
 using namespace Tau;
 using namespace Collection;
+
+static Array<String> g_rawExtraArgs;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -68,11 +71,14 @@ static void resolveTerminalSize(const String &colOpt, const String &rowOpt, int 
 
 
 static String resolveExecutable(const String &name) {
-    // 1. <tau current path from the running binary>/<name>
+    // 1. Current running binary or sibling
     char selfBuf[4096] = {};
     ssize_t n = ::readlink("/proc/self/exe", selfBuf, sizeof(selfBuf) - 1);
     if (n > 0) {
         String selfPath(selfBuf);
+        if (name == "tau" && ::access(selfPath.c_str(), X_OK) == 0) {
+            return selfPath;
+        }
         long long sl = rfind(selfPath, '/');
         if (sl >= 0) {
             String siblingBin = selfPath.substring(0, (size_t)sl) + "/" + name;
@@ -82,21 +88,21 @@ static String resolveExecutable(const String &name) {
         }
     }
 
-    // 2. Prioritize TAU_PATH/source/build/<name> (check global then user path)
+    // 2. Check TAU_GLOBAL/<name> or TAU_GLOBAL/source/build/<name> if global is active
+    String globalBin = Config::tauGlobal() + "/" + name;
+    if (pathExists(globalBin) && ::access(globalBin.c_str(), X_OK) == 0) {
+        return globalBin;
+    }
+
     String sourceBuildGlobal = Config::tauGlobal() + "/source/build/" + name;
     if (pathExists(sourceBuildGlobal) && ::access(sourceBuildGlobal.c_str(), X_OK) == 0) {
         return sourceBuildGlobal;
     }
 
+    // 3. TAU_PATH/source/build/<name>
     String sourceBuildUser = Config::tauPath() + "/source/build/" + name;
     if (pathExists(sourceBuildUser) && ::access(sourceBuildUser.c_str(), X_OK) == 0) {
         return sourceBuildUser;
-    }
-
-    // 3. Fallback to TAU_GLOBAL/<name>
-    String globalBin = Config::tauGlobal() + "/" + name;
-    if (pathExists(globalBin) && ::access(globalBin.c_str(), X_OK) == 0) {
-        return globalBin;
     }
 
     // 4. Default to binary name for PATH lookup
@@ -237,11 +243,12 @@ static int launchSpawnProcess(const String        &instanceName,
                                const String        &headDir = "",
                                bool                 copyYaml = true,
                                bool                 watch = true,
-                               const Array<String> &extraArgs = {}) {
+                               const Array<String> &extraArgs = {},
+                               const String        &enterSlot = "") {
 
-    String spawnBin = resolveExecutable("tau-instance");
+    String tauBin = resolveExecutable("tau");
 
-    // Double-fork + setsid to fully detach tau-instance from the terminal session.
+    // Double-fork + setsid to fully detach tau do-instance from the terminal session.
     // First fork: parent continues, intermediate child detaches.
     pid_t pid1 = ::fork();
     if (pid1 < 0) { Terminal::Error("tau: fork failed"); return 1; }
@@ -384,49 +391,65 @@ static int launchSpawnProcess(const String        &instanceName,
     }
 #endif
 
-    Array<const char *> argv;
-    argv.push(spawnBin.c_str());
-    argv.push("--name"); argv.push(instanceName.c_str());
+    Array<String> argStrings;
+    argStrings.push(tauBin);
+    argStrings.push("do-instance");
+    argStrings.push("--name"); argStrings.push(instanceName);
     if (!headDir.isEmpty()) {
-        argv.push("--head");
-        argv.push(headDir.c_str());
+        argStrings.push("--head");
+        argStrings.push(headDir);
     }
-    if (headless) argv.push("--headless");
-    if (!copyYaml) argv.push("--no-copy");
-    if (!watch) argv.push("--no-watch");
-    if (remove_)  argv.push("--remove");
-    if (global_)  argv.push("--global");
+    if (headless) argStrings.push("--headless");
+    if (!copyYaml) argStrings.push("--no-copy");
+    if (!watch) argStrings.push("--no-watch");
+    if (remove_)  argStrings.push("--remove");
+    if (global_)  argStrings.push("--global");
     if (!sourceManifestPath.isEmpty()) {
-        argv.push("--source-manifest");
-        argv.push(sourceManifestPath.c_str());
+        argStrings.push("--source-manifest");
+        argStrings.push(sourceManifestPath);
     }
     if (!workDir.isEmpty()) {
-        argv.push("--workdir");
-        argv.push(workDir.c_str());
+        argStrings.push("--workdir");
+        argStrings.push(workDir);
     }
-    argv.push("--detach");
-    if (debug) argv.push("--debug");
+    if (!enterSlot.isEmpty()) {
+        argStrings.push("--enter");
+        argStrings.push(enterSlot);
+    }
+    argStrings.push("--detach");
+    if (debug) argStrings.push("--debug");
     if (!detachKey.isEmpty()) {
-        argv.push("--detach-key");
-        argv.push(detachKey.c_str());
+        argStrings.push("--detach-key");
+        argStrings.push(detachKey);
     }
-    String colStr = intStr(cols);
-    String rowStr = intStr(rows);
-    argv.push("--col"); argv.push(colStr.c_str());
-    argv.push("--row"); argv.push(rowStr.c_str());
+    argStrings.push("--col"); argStrings.push(intStr(cols));
+    argStrings.push("--row"); argStrings.push(intStr(rows));
 
     for (size_t i = 0; i < manifestEntries.length(); ++i) {
-        argv.push(manifestEntries[i].c_str());
+        argStrings.push(manifestEntries[i]);
     }
     if (extraArgs.length() > 0) {
-        argv.push("--");
+        argStrings.push("--");
         for (size_t i = 0; i < extraArgs.length(); ++i) {
-            argv.push(extraArgs[i].c_str());
+            argStrings.push(extraArgs[i]);
         }
+    }
+
+    Array<const char *> argv;
+    for (size_t i = 0; i < argStrings.length(); ++i) {
+        argv.push(argStrings[i].c_str());
     }
     argv.push(nullptr);
 
-    ::execvp(spawnBin.c_str(), (char *const *)argv.data());
+    ::execvp(tauBin.c_str(), (char *const *)argv.data());
+    int err = errno;
+    String errFile = "/tmp/tau_exec_fail_" + instanceName + ".log";
+    int efd = ::open(errFile.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (efd >= 0) {
+        String msg = "execvp failed on " + tauBin + " with errno=" + intStr(err) + "\n";
+        (void)::write(efd, msg.c_str(), msg.length());
+        ::close(efd);
+    }
     ::_exit(127);
 }
 
@@ -609,6 +632,443 @@ static int cmdRemove(const String &manifestArg) {
     }
 }
 
+// ─── tau enable ───────────────────────────────────────────────────────────────
+
+static int cmdEnable(Command &cmd) {
+    Config::init();
+    Config::ensureLayout();
+
+    bool copyMode = cmd.flag("--copy -c");
+    String customName = cmd.option("--name -n").string();
+    bool runNow = cmd.flag("--now -o");
+    String listName = cmd.option("--list -l").defaults("default").string();
+
+    Array<String> entries;
+    for (size_t i = 0; ; ++i) {
+        String p = cmd[i];
+        if (p.isEmpty()) break;
+        if (!p.startsWith("-")) {
+            entries.push(p);
+        }
+    }
+
+    if (entries.length() == 0) {
+        String cwdYml = resolveCwd() + "/tau.yml";
+        if (pathExists(cwdYml)) {
+            entries.push(cwdYml);
+        } else {
+            Terminal::Error("No manifest entries specified for tau enable.");
+            return 1;
+        }
+    }
+
+    String listDir = Config::listsPath(listName);
+    mkdirP(listDir);
+
+    // Determine target name
+    String targetName = customName;
+    if (targetName.isEmpty()) {
+        // Try extracting from the last entry's manifest metadata
+        String primaryPath = entries[entries.length() - 1];
+        if (!primaryPath.startsWith("/")) primaryPath = resolveCwd() + "/" + primaryPath;
+        ParseError err;
+        Array<String> visited;
+        ParsedManifest pm = Manifest::load(primaryPath, visited, err);
+        if (err.ok && !pm.meta.name.isEmpty()) {
+            targetName = pm.meta.name;
+        } else {
+            // Resort to filename
+            long long sl = rfind(primaryPath, '/');
+            String fn = (sl >= 0) ? primaryPath.substring((size_t)sl + 1) : primaryPath;
+            if (fn.endsWith(".yml")) fn = fn.substring(0, fn.length() - 4);
+            if (fn.endsWith(".yaml")) fn = fn.substring(0, fn.length() - 5);
+            targetName = fn;
+        }
+    }
+
+    if (targetName.isEmpty()) targetName = "entry";
+
+    String targetFile = listDir + "/" + targetName + ".yml";
+
+    if (entries.length() == 1) {
+        String srcPath = entries[0];
+        if (!srcPath.startsWith("/")) srcPath = resolveCwd() + "/" + srcPath;
+        char realSrc[4096] = {};
+        if (::realpath(srcPath.c_str(), realSrc)) srcPath = String(realSrc);
+
+        ::unlink(targetFile.c_str());
+        if (copyMode) {
+            Resource::LinuxFS fs;
+            String content = fs.read(srcPath);
+            fs.write(targetFile, content);
+        } else {
+            if (::symlink(srcPath.c_str(), targetFile.c_str()) != 0) {
+                Terminal::Error("Failed to symlink " + targetFile + " -> " + srcPath);
+                return 1;
+            }
+        }
+    } else {
+        // Multi-entry: merge via template slots and write merged YAML
+        Array<ParsedManifest *> templates;
+        for (size_t i = 0; i < entries.length() - 1; ++i) {
+            String ep = entries[i];
+            if (!ep.startsWith("/")) ep = resolveCwd() + "/" + ep;
+            ParseError err;
+            Array<String> visited;
+            ParsedManifest *pm = new ParsedManifest(Manifest::load(ep, visited, err));
+            if (!err.ok) {
+                Terminal::Error("Failed to parse template " + ep + ": " + err.message);
+                for (auto *t : templates) delete t;
+                return 1;
+            }
+            templates.push(pm);
+        }
+        String lastPath = entries[entries.length() - 1];
+        if (!lastPath.startsWith("/")) lastPath = resolveCwd() + "/" + lastPath;
+        ParseError lastErr;
+        Array<String> lastVisited;
+        ParsedManifest lastPm = Manifest::load(lastPath, lastVisited, lastErr);
+        if (!lastErr.ok) {
+            Terminal::Error("Failed to parse entry " + lastPath + ": " + lastErr.message);
+            for (auto *t : templates) delete t;
+            return 1;
+        }
+        DirectiveList merged = Manifest::applySlots(templates, lastPm);
+        for (auto *t : templates) delete t;
+
+        String yaml = Manifest::toYAML(merged);
+        for (auto *d : merged) delete d;
+
+        ::unlink(targetFile.c_str());
+        Resource::LinuxFS fs;
+        fs.write(targetFile, yaml);
+    }
+
+    Terminal::Success("Enabled '" + targetName + "' in list '" + listName + "' (" + targetFile + ")");
+
+    if (runNow) {
+        Array<String> runEntries;
+        runEntries.push(targetFile);
+        return launchSpawnProcess(targetName, runEntries, resolveCwd(), /*detach=*/false, /*attachStdin=*/true, "^D");
+    }
+
+    return 0;
+}
+
+// ─── tau disable ──────────────────────────────────────────────────────────────
+
+static void stopInstanceByName(const String &instName) {
+    InstanceState state;
+    if (Instance::load(Config::instanceDir(instName), state)) {
+        for (size_t si = 0; si < state.spawns.length(); ++si) {
+            if (state.spawns[si].pid > 0) {
+                ::kill(-state.spawns[si].pid, SIGKILL);
+                ::kill(state.spawns[si].pid, SIGKILL);
+            }
+        }
+        if (state.spawnPID > 0 && ::kill(state.spawnPID, 0) == 0) {
+            ::kill(-state.spawnPID, SIGKILL);
+            ::kill(state.spawnPID, SIGKILL);
+        }
+    }
+    ::system(("rm -rf '" + Config::instanceDir(instName) + "'").c_str());
+    if (state.spawnPID > 0) {
+        String killFwd = String("pkill -9 -f 'nsenter -t ") + intStr(state.spawnPID) + "' 2>/dev/null";
+        (void)::system(killFwd.c_str());
+    }
+    Monitor::broadcast("STOP", instName, 0, "exit_code=0");
+}
+
+static int cmdDisable(Command &cmd) {
+    Config::init();
+    Config::ensureLayout();
+
+    String nameOpt = cmd.option("--name -n").string();
+    if (nameOpt.isEmpty()) {
+        for (size_t i = 0; ; ++i) {
+            String p = cmd[i];
+            if (p.isEmpty()) break;
+            if (!p.startsWith("-")) {
+                nameOpt = p;
+                break;
+            }
+        }
+    }
+
+    String listOpt = cmd.option("--list -l").string();
+    bool isRegex = cmd.flag("--regex");
+    bool stopIfRunning = cmd.flag("--stop -s");
+
+    // "Giving a --list and not a name, will stop the whole list, and remove all temporary run counters of that list"
+    if (nameOpt.isEmpty()) {
+        if (!listOpt.isEmpty()) {
+            String ldir = Config::listsPath(listOpt);
+            String ltemp = Config::listTempPath(listOpt);
+
+            int stoppedCount = 0;
+            DIR *d = ::opendir(ldir.c_str());
+            if (d) {
+                struct dirent *ent;
+                while ((ent = ::readdir(d)) != nullptr) {
+                    if (ent->d_name[0] == '.') continue;
+                    String fname(ent->d_name);
+                    String stem = fname;
+                    if (stem.endsWith(".yml")) stem = stem.substring(0, stem.length() - 4);
+                    if (stem.endsWith(".yaml")) stem = stem.substring(0, stem.length() - 5);
+                    stopInstanceByName(stem);
+                    stoppedCount++;
+                }
+                ::closedir(d);
+            }
+
+            // Remove all temporary run counters of that list
+            ::system(("rm -rf '" + ltemp + "'").c_str());
+            Terminal::Success("Stopped list '" + listOpt + "' and cleared temporary run counters.");
+            return 0;
+        }
+
+        Terminal::Error("tau disable requires a --name (-n) or --list (-l) argument.");
+        return 1;
+    }
+
+    regex_t preg;
+    if (isRegex) {
+        if (::regcomp(&preg, nameOpt.c_str(), REG_EXTENDED | REG_NOSUB) != 0) {
+            Terminal::Error("Invalid regex: " + nameOpt);
+            return 1;
+        }
+    }
+
+    Array<String> listsToSearch;
+    String listsRoot = Config::listsPath();
+    if (!listOpt.isEmpty()) {
+        listsToSearch.push(Config::listsPath(listOpt));
+    } else {
+        DIR *ld = ::opendir(listsRoot.c_str());
+        if (ld) {
+            struct dirent *ent;
+            while ((ent = ::readdir(ld)) != nullptr) {
+                if (ent->d_name[0] == '.') continue;
+                String dname(ent->d_name);
+                String full = listsRoot + "/" + dname;
+                if (isDir(full)) {
+                    listsToSearch.push(full);
+                }
+            }
+            ::closedir(ld);
+        }
+        if (listsToSearch.length() == 0) {
+            listsToSearch.push(Config::listsPath("default"));
+        }
+    }
+
+    int disabledCount = 0;
+    Array<String> matchedNames;
+
+    for (size_t li = 0; li < listsToSearch.length(); ++li) {
+        String ldir = listsToSearch[li];
+        DIR *d = ::opendir(ldir.c_str());
+        if (!d) continue;
+
+        struct dirent *ent;
+        while ((ent = ::readdir(d)) != nullptr) {
+            if (ent->d_name[0] == '.') continue;
+            String fname(ent->d_name);
+            String stem = fname;
+            if (stem.endsWith(".yml")) stem = stem.substring(0, stem.length() - 4);
+            if (stem.endsWith(".yaml")) stem = stem.substring(0, stem.length() - 5);
+
+            bool matches = false;
+            if (isRegex) {
+                matches = (::regexec(&preg, stem.c_str(), 0, nullptr, 0) == 0) ||
+                          (::regexec(&preg, fname.c_str(), 0, nullptr, 0) == 0);
+            } else {
+                matches = (stem == nameOpt || fname == nameOpt);
+            }
+
+            if (matches) {
+                String fullPath = ldir + "/" + fname;
+                ::unlink(fullPath.c_str());
+                matchedNames.push(stem);
+                disabledCount++;
+                Terminal::Success("Disabled '" + stem + "' from " + ldir);
+            }
+        }
+        ::closedir(d);
+    }
+
+    if (isRegex) ::regfree(&preg);
+
+    if (stopIfRunning) {
+        for (size_t mi = 0; mi < matchedNames.length(); ++mi) {
+            String target = matchedNames[mi];
+            stopInstanceByName(target);
+        }
+    }
+
+    if (disabledCount == 0) {
+        Terminal::Warn("No entries matching '" + nameOpt + "' found in lists.");
+        return 1;
+    }
+
+    return 0;
+}
+
+// ─── tau do-list ──────────────────────────────────────────────────────────────
+
+static int cmdDoList(Command &cmd) {
+    Config::init();
+    Config::ensureLayout();
+
+    String listName = cmd.option("--list -l").defaults("default").string();
+    bool regardless = cmd.flag("--regardless -r");
+
+    String listDir = Config::listsPath(listName);
+    String tempDir = Config::listTempPath(listName);
+    mkdirP(tempDir);
+
+    if (!isDir(listDir)) {
+        Terminal::Warn("List directory not found: " + listDir);
+        return 0;
+    }
+
+    DIR *d = ::opendir(listDir.c_str());
+    if (!d) {
+        Terminal::Error("Cannot open list directory: " + listDir);
+        return 1;
+    }
+
+    Array<String> files;
+    struct dirent *ent;
+    while ((ent = ::readdir(d)) != nullptr) {
+        if (ent->d_name[0] == '.') continue;
+        String fname(ent->d_name);
+        if (fname.endsWith(".yml") || fname.endsWith(".yaml")) {
+            files.push(fname);
+        }
+    }
+    ::closedir(d);
+
+    int launchedCount = 0;
+    for (size_t i = 0; i < files.length(); ++i) {
+        const String &fname = files[i];
+        String stem = fname;
+        if (stem.endsWith(".yml")) stem = stem.substring(0, stem.length() - 4);
+        if (stem.endsWith(".yaml")) stem = stem.substring(0, stem.length() - 5);
+
+        String manifestFile = listDir + "/" + fname;
+        String counterFile = tempDir + "/" + stem + ".run";
+
+        // Check if instance is currently running
+        bool isRunning = false;
+        InstanceState st;
+        if (Instance::load(Config::instanceDir(stem), st) && st.status == InstanceStatus::Running) {
+            isRunning = true;
+        }
+
+        if (isRunning) {
+            // Already running, skip
+            continue;
+        }
+
+        bool alreadyRun = pathExists(counterFile);
+        if (alreadyRun && !regardless) {
+            // Ran in this boot / temp session and not regardless, skip
+            continue;
+        }
+
+        // Mark run counter in temp path
+        Resource::LinuxFS fs;
+        fs.write(counterFile, "1\n");
+
+        Terminal::Info("Running list item: " + stem + " (" + manifestFile + ")");
+        Array<String> entries;
+        entries.push(manifestFile);
+        launchSpawnProcess(stem, entries, resolveCwd(), /*detach=*/true, /*attachStdin=*/false, "^D", /*historyLines=*/0, /*debug=*/false, /*cols=*/80, /*rows=*/24, /*headless=*/true, /*remove_=*/false, /*global_=*/false, /*sourceManifestPath=*/"", /*headDir=*/"", /*copyYaml=*/true, /*watch=*/false);
+        launchedCount++;
+    }
+
+    Terminal::Success("Processed list '" + listName + "': launched " + intStr(launchedCount) + " item(s).");
+    return 0;
+}
+
+static void extractBinDirsFromDirectives(const DirectiveList &directives, const String &baseDir, Array<String> &visited, Array<String> &outBinDirs);
+
+static void collectBinDirs(const String &manifestPath, Array<String> &visited, Array<String> &outBinDirs) {
+    for (size_t i = 0; i < visited.length(); ++i) {
+        if (visited[i] == manifestPath) return;
+    }
+    visited.push(manifestPath);
+    if (!pathExists(manifestPath)) return;
+
+    ParseError err;
+    Array<String> parseVisited;
+    ParsedManifest parsed = Manifest::load(manifestPath, parseVisited, err);
+    if (!err.ok) return;
+
+    String baseDir = manifestPath;
+    long long sl = rfind(baseDir, '/');
+    if (sl >= 0) baseDir = baseDir.substring(0, (size_t)sl);
+
+    extractBinDirsFromDirectives(parsed.directives, baseDir, visited, outBinDirs);
+}
+
+static void extractBinDirsFromDirectives(const DirectiveList &directives, const String &baseDir, Array<String> &visited, Array<String> &outBinDirs) {
+    for (size_t i = 0; i < directives.length(); ++i) {
+        Directive *d = directives[i];
+        if (!d) continue;
+        if (d->kind == DirectiveKind::BinDir) {
+            auto *bd = static_cast<DBinDir *>(d);
+            if (!bd->path.isEmpty()) {
+                String p = bd->path;
+                if (!p.startsWith("/")) p = baseDir + "/" + p;
+                char realP[4096] = {};
+                if (::realpath(p.c_str(), realP)) p = String(realP);
+                bool found = false;
+                for (size_t k = 0; k < outBinDirs.length(); ++k) {
+                    if (outBinDirs[k] == p) { found = true; break; }
+                }
+                if (!found) outBinDirs.push(p);
+            }
+        } else if (d->kind == DirectiveKind::And) {
+            extractBinDirsFromDirectives(static_cast<DAnd *>(d)->children, baseDir, visited, outBinDirs);
+        } else if (d->kind == DirectiveKind::Or) {
+            extractBinDirsFromDirectives(static_cast<DOr *>(d)->children, baseDir, visited, outBinDirs);
+        } else if (d->kind == DirectiveKind::WaitExit) {
+            extractBinDirsFromDirectives(static_cast<DWaitExit *>(d)->children, baseDir, visited, outBinDirs);
+        } else if (d->kind == DirectiveKind::Retry) {
+            extractBinDirsFromDirectives(static_cast<DRetry *>(d)->children, baseDir, visited, outBinDirs);
+        } else if (d->kind == DirectiveKind::Manifest) {
+            auto *md = static_cast<DManifest *>(d);
+            if (!md->path.isEmpty()) {
+                String mp = md->path;
+                if (!mp.startsWith("/")) mp = baseDir + "/" + mp;
+                collectBinDirs(mp, visited, outBinDirs);
+            }
+        } else if (d->kind == DirectiveKind::Git) {
+            auto *gd = static_cast<DGit *>(d);
+            if (!gd->target.isEmpty()) {
+                String tp = gd->target;
+                if (!tp.startsWith("/")) tp = baseDir + "/" + tp;
+                collectBinDirs(tp + "/tau.yml", visited, outBinDirs);
+                collectBinDirs(tp + "/manifest.yml", visited, outBinDirs);
+                if (pathExists(tp + "/node_modules/.bin")) {
+                    char realP[4096] = {};
+                    String np = ::realpath((tp + "/node_modules/.bin").c_str(), realP) ? String(realP) : (tp + "/node_modules/.bin");
+                    bool found = false; for (size_t k = 0; k < outBinDirs.length(); ++k) if (outBinDirs[k] == np) { found = true; break; }
+                    if (!found) outBinDirs.push(np);
+                }
+                if (pathExists(tp + "/bin")) {
+                    char realP[4096] = {};
+                    String np = ::realpath((tp + "/bin").c_str(), realP) ? String(realP) : (tp + "/bin");
+                    bool found = false; for (size_t k = 0; k < outBinDirs.length(); ++k) if (outBinDirs[k] == np) { found = true; break; }
+                    if (!found) outBinDirs.push(np);
+                }
+            }
+        }
+    }
+}
+
 // ─── tau activate ─────────────────────────────────────────────────────────────
 
 static int cmdActivate(const String &manifestArg) {
@@ -620,38 +1080,41 @@ static int cmdActivate(const String &manifestArg) {
         }
     }
 
-    String binDirPath = resolveCwd() + "/bin";
-
+    Array<String> binDirs;
+    Array<String> visited;
     if (pathExists(manifestPath)) {
-        Array<String> visited;
-        ParseError err;
-        ParsedManifest parsed = Manifest::load(manifestPath, visited, err);
-        if (err.ok) {
-            String baseDir = manifestPath;
-            long long sl = rfind(baseDir, '/');
-            if (sl >= 0) baseDir = baseDir.substring(0, (size_t)sl);
-
-            for (size_t i = 0; i < parsed.directives.length(); ++i) {
-                Directive *d = parsed.directives[i];
-                if (d && d->kind == DirectiveKind::BinDir) {
-                    auto *bd = static_cast<DBinDir *>(d);
-                    if (!bd->path.isEmpty()) {
-                        String p = bd->path;
-                        if (!p.startsWith("/")) p = baseDir + "/" + p;
-                        binDirPath = p;
-                        break;
-                    }
-                }
-            }
-        }
+        collectBinDirs(manifestPath, visited, binDirs);
     }
 
-    char realBin[4096] = {};
-    if (::realpath(binDirPath.c_str(), realBin)) {
-        binDirPath = String(realBin);
+    // Also check standard local bin and node_modules/.bin if present
+    String cwd = resolveCwd();
+    String localBin = cwd + "/bin";
+    String localNodeBin = cwd + "/node_modules/.bin";
+    if (pathExists(localBin)) {
+        char r[4096];
+        String rp = ::realpath(localBin.c_str(), r) ? String(r) : localBin;
+        bool f = false; for (size_t i = 0; i < binDirs.length(); ++i) if (binDirs[i] == rp) { f = true; break; }
+        if (!f) binDirs.push(rp);
+    }
+    if (pathExists(localNodeBin)) {
+        char r[4096];
+        String rp = ::realpath(localNodeBin.c_str(), r) ? String(r) : localNodeBin;
+        bool f = false; for (size_t i = 0; i < binDirs.length(); ++i) if (binDirs[i] == rp) { f = true; break; }
+        if (!f) binDirs.push(rp);
     }
 
-    ::printf("export PATH=\"%s:$PATH\"\n", binDirPath.c_str());
+    // Default fallback if none found
+    if (binDirs.length() == 0) {
+        binDirs.push(localBin);
+    }
+
+    String pathExport;
+    for (size_t i = 0; i < binDirs.length(); ++i) {
+        if (!pathExport.isEmpty()) pathExport += ":";
+        pathExport += binDirs[i];
+    }
+
+    ::printf("export PATH=\"%s:$PATH\"\n", pathExport.c_str());
     return 0;
 }
 
@@ -660,9 +1123,9 @@ static int launchStoreInBackground(const String &manifestPath) {
     char rbuf[4096];
     if (::realpath(manifestPath.c_str(), rbuf)) realPath = String(rbuf);
 
-    String storeBin = resolveExecutable("tau-store");
+    String tauBin = resolveExecutable("tau");
 
-    bool isGlobal = storeBin.startsWith(Config::tauGlobal());
+    bool isGlobal = tauBin.startsWith(Config::tauGlobal());
     bool useSudo = false;
 
     if (isGlobal) {
@@ -673,15 +1136,15 @@ static int launchStoreInBackground(const String &manifestPath) {
                 useSudo = true;
             } else {
                 Terminal::Warn("sudo permission not available for global store; falling back to user-local tau at " + Config::tauPath());
-                String userStore = Config::tauPath() + "/source/build/tau-store";
-                if (pathExists(userStore) && ::access(userStore.c_str(), X_OK) == 0) {
-                    storeBin = userStore;
+                String userTau = Config::tauPath() + "/source/build/tau";
+                if (pathExists(userTau) && ::access(userTau.c_str(), X_OK) == 0) {
+                    tauBin = userTau;
                 }
                 useSudo = false;
             }
         }
     } else {
-        Terminal::Warn("Using user-local tau-store (" + storeBin + "); global store is not active.");
+        Terminal::Warn("Using user-local tau (" + tauBin + "); global store is not active.");
         useSudo = false;
     }
 
@@ -704,9 +1167,9 @@ static int launchStoreInBackground(const String &manifestPath) {
         ::close(pipefd[1]);
 
         if (useSudo) {
-            ::execlp("sudo", "sudo", "-n", storeBin.c_str(), nullptr);
+            ::execlp("sudo", "sudo", "-n", tauBin.c_str(), "do-store", nullptr);
         }
-        ::execlp(storeBin.c_str(), storeBin.c_str(), nullptr);
+        ::execlp(tauBin.c_str(), tauBin.c_str(), "do-store", nullptr);
         ::_exit(127);
     }
 
@@ -783,29 +1246,87 @@ static int cmdGitHub(const Array<String> &repos,
 }
 
 
-// ─── tau run ──────────────────────────────────────────────────────────────────
+static bool findBinaryInParentManifests(const String &binName, String &outManifestPath, String &outBinWrapper) {
+    String currentDir = resolveCwd();
+    while (!currentDir.isEmpty()) {
+        Array<String> candidates;
+        candidates.push(currentDir + "/tau.yml");
+        candidates.push(currentDir + "/tau.yaml");
+        candidates.push(currentDir + "/manifest.yml");
+        candidates.push(currentDir + "/manifest.yaml");
 
-static int cmdRun(Command &args) {
+        for (size_t ci = 0; ci < candidates.length(); ++ci) {
+            String mPath = candidates[ci];
+            if (!pathExists(mPath)) continue;
+
+            Array<String> binDirs;
+            Array<String> visited;
+            collectBinDirs(mPath, visited, binDirs);
+
+            for (size_t bi = 0; bi < binDirs.length(); ++bi) {
+                String candidateBin = binDirs[bi] + "/" + binName;
+                if (pathExists(candidateBin) && ::access(candidateBin.c_str(), X_OK) == 0) {
+                    outManifestPath = mPath;
+                    outBinWrapper = candidateBin;
+                    return true;
+                }
+            }
+
+            ParseError err;
+            Array<String> parseVisited;
+            ParsedManifest parsed = Manifest::load(mPath, parseVisited, err);
+            if (err.ok) {
+                for (size_t di = 0; di < parsed.directives.length(); ++di) {
+                    if (parsed.directives[di]->kind == DirectiveKind::Bin) {
+                        auto *b = static_cast<DBin *>(parsed.directives[di]);
+                        if (b->name == binName) {
+                            outManifestPath = mPath;
+                            outBinWrapper = "";
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+
+        long long sl = rfind(currentDir, '/');
+        if (sl <= 0) break;
+        currentDir = currentDir.substring(0, (size_t)sl);
+    }
+    return false;
+}
+
+// ─── tau run & tau start ──────────────────────────────────────────────────────
+
+static int cmdRun(Command &args, bool defaultHeadless = false, Command *rootArgs = nullptr) {
     bool   detach       = args.flag("--detach -d");
     bool   attachIn     = args.flag("--in -i");
     String name         = args.option("--name -n").string();
     String detachKey    = args.option("--detach-key -k").defaults("ctrl+b").string();
     String colOpt       = args.option("--col").defaults("auto").string();
     String rowOpt       = args.option("--row").defaults("auto").string();
-    bool   headless     = args.flag("--headless");
     String headOpt      = args.option("--head").string();
+    bool   hasHeadFlag  = args.flag("-H");
+    bool   headlessOpt  = args.flag("--headless");
+    bool   headless     = defaultHeadless;
+    if (headlessOpt) headless = true;
+    if (hasHeadFlag || !headOpt.isEmpty()) headless = false;
     bool   copyYaml     = args.option("--copy -c").defaults("true").boolean();
     bool   watch        = args.option("--watch -w").defaults("true").boolean();
     bool   remove_      = args.flag("--remove -r");
     bool   global_      = args.flag("--global -g");
     bool   debug        = args.flag("--debug -v");
+    String enterOpt     = args.option("--enter").string();
+    if (enterOpt.isEmpty() && rootArgs && rootArgs != &args) {
+        enterOpt = rootArgs->option("--enter").string();
+    }
     String timestampOpt = args.option("--timestamp -t").string();
     if (debug) g_debugMode = true;
 
     int cols = 80, rows = 24;
     resolveTerminalSize(colOpt, rowOpt, cols, rows);
 
-    auto optHist = args.option("--history -h");
+    auto &optHist = args.option("--history -h");
     int historyLines = 0;
     if (optHist) {
         String val = optHist.string();
@@ -834,8 +1355,42 @@ static int cmdRun(Command &args) {
         }
     }
 
+    Command &sepCmd = args.separate("--");
+    for (size_t si = 0; si < sepCmd.value.length(); ++si) {
+        extraArgs.push(sepCmd.value[si]);
+    }
+    for (size_t si = 0; ; ++si) {
+        String sp = sepCmd[si];
+        if (sp.isEmpty()) break;
+        bool found = false;
+        for (size_t k = 0; k < extraArgs.length(); ++k) if (extraArgs[k] == sp) { found = true; break; }
+        if (!found) extraArgs.push(sp);
+    }
+
+    if (rootArgs && rootArgs != &args) {
+        Command &rootSep = rootArgs->separate("--");
+        for (size_t si = 0; si < rootSep.value.length(); ++si) {
+            bool found = false;
+            for (size_t k = 0; k < extraArgs.length(); ++k) if (extraArgs[k] == rootSep.value[si]) { found = true; break; }
+            if (!found) extraArgs.push(rootSep.value[si]);
+        }
+        for (size_t si = 0; ; ++si) {
+            String sp = rootSep[si];
+            if (sp.isEmpty()) break;
+            bool found = false;
+            for (size_t k = 0; k < extraArgs.length(); ++k) if (extraArgs[k] == sp) { found = true; break; }
+            if (!found) extraArgs.push(sp);
+        }
+    }
+
+    for (size_t gi = 0; gi < g_rawExtraArgs.length(); ++gi) {
+        bool found = false;
+        for (size_t k = 0; k < extraArgs.length(); ++k) if (extraArgs[k] == g_rawExtraArgs[gi]) { found = true; break; }
+        if (!found) extraArgs.push(g_rawExtraArgs[gi]);
+    }
+
     if (positionals.length() == 0) {
-        Terminal::Fatal("tau run: no manifest or instance specified");
+        Terminal::Fatal("tau: no manifest, binary, or instance specified");
         return 1;
     }
 
@@ -848,6 +1403,29 @@ static int cmdRun(Command &args) {
         else instFolderPath = firstArg;
     } else if (pathExists(Config::instanceDir(firstArg) + "/instance.yml") || pathExists(Config::instanceDir(firstArg) + "/snapshots")) {
         instFolderPath = Config::instanceDir(firstArg);
+    } else if (!pathExists(firstArg) && !firstArg.endsWith(".yml") && !firstArg.endsWith(".yaml") && firstArg.find("/") < 0) {
+        String outManifest, outWrapper;
+        if (findBinaryInParentManifests(firstArg, outManifest, outWrapper)) {
+            if (!outWrapper.isEmpty()) {
+                Array<String> allArgs;
+                allArgs.push(outWrapper);
+                for (size_t ei = 1; ei < positionals.length(); ++ei) allArgs.push(positionals[ei]);
+                for (size_t ei = 0; ei < extraArgs.length(); ++ei) allArgs.push(extraArgs[ei]);
+
+                char **cargv = new char*[allArgs.length() + 1];
+                for (size_t ai = 0; ai < allArgs.length(); ++ai) {
+                    cargv[ai] = ::strdup(allArgs[ai].c_str());
+                }
+                cargv[allArgs.length()] = nullptr;
+                ::execv(outWrapper.c_str(), cargv);
+            } else {
+                positionals[0] = outManifest;
+                Array<String> newExtra;
+                newExtra.push(firstArg);
+                for (size_t ei = 0; ei < extraArgs.length(); ++ei) newExtra.push(extraArgs[ei]);
+                extraArgs = Xi::Move(newExtra);
+            }
+        }
     }
 
     String snapshotTimestamp;
@@ -904,11 +1482,14 @@ static int cmdRun(Command &args) {
     String lastEntry = positionals[positionals.length() - 1];
 
     if (name.isEmpty()) {
-        Array<String> visited;
-        ParseError ferr;
-        ParsedManifest pm = Manifest::load(lastEntry, visited, ferr);
-        if (ferr.ok && !pm.meta.name.isEmpty()) {
-            name = pm.meta.name;
+        for (size_t i = 0; i < positionals.length(); ++i) {
+            Array<String> visited;
+            ParseError ferr;
+            ParsedManifest pm = Manifest::load(positionals[i], visited, ferr);
+            if (ferr.ok && !pm.meta.name.isEmpty()) {
+                name = pm.meta.name;
+                break;
+            }
         }
     }
     String instanceName = uniqueInstanceName(name.isEmpty() ? "0" : name);
@@ -939,7 +1520,7 @@ static int cmdRun(Command &args) {
 
     return launchSpawnProcess(instanceName, positionals, workDir,
                                detach, attachStdin, detachKey, historyLines, debug, cols, rows,
-                               headless, remove_, global_, lastEntry, instDir, copyYaml, watch, extraArgs);
+                               headless, remove_, global_, lastEntry, instDir, copyYaml, watch, extraArgs, enterOpt);
 }
 
 
@@ -964,9 +1545,14 @@ static int cmdSnapshot(Command &args) {
     }
 
     String instName, spawnName;
+    bool hasExplicitSpawn = (spec.find(":") >= 0 || spec.find(".") >= 0);
     if (!Instance::resolve(spec, Config::instancesPath(), instName, spawnName)) {
         Terminal::Error("Instance not found: " + spec);
         return 1;
+    }
+
+    if (!hasExplicitSpawn) {
+        spawnName = "";
     }
 
     String instDir = Config::instanceDir(instName);
@@ -976,9 +1562,13 @@ static int cmdSnapshot(Command &args) {
         return 1;
     }
 
-    String ts = client.snapshot();
+    String ts = client.snapshot(spawnName);
     if (!ts.isEmpty()) {
-        Terminal::Success("Snapshot " + ts + " created for " + instName);
+        if (!spawnName.isEmpty()) {
+            Terminal::Success("Snapshot " + ts + " created for " + instName + ":" + spawnName);
+        } else {
+            Terminal::Success("Snapshot " + ts + " created for " + instName);
+        }
         return 0;
     }
     Terminal::Error("Failed to take snapshot for " + instName);
@@ -988,17 +1578,26 @@ static int cmdSnapshot(Command &args) {
 // ─── tau freeze ───────────────────────────────────────────────────────────────
 
 static int cmdFreeze(Command &args) {
-    String spec = args[0];
+    bool   softOpt = args.flag("--soft");
+    bool   wolOpt  = args.option("--wol").defaults("true").boolean();
+    String spec    = args[0];
     if (spec.isEmpty()) {
         Terminal::Fatal("tau freeze: no instance specified");
         return 1;
     }
 
     String instName, spawnName;
+    bool hasExplicitSpawn = (spec.find(":") >= 0 || spec.find(".") >= 0);
     if (!Instance::resolve(spec, Config::instancesPath(), instName, spawnName)) {
         Terminal::Error("Instance not found: " + spec);
         return 1;
     }
+
+    if (!hasExplicitSpawn) {
+        spawnName = "";
+    }
+
+    bool isSoft = softOpt || hasExplicitSpawn;
 
     String instDir = Config::instanceDir(instName);
     IPCClient client;
@@ -1007,12 +1606,18 @@ static int cmdFreeze(Command &args) {
         return 1;
     }
 
-    String ts = client.freeze();
+    String ts = client.freeze(spawnName, isSoft, wolOpt);
     if (!ts.isEmpty()) {
-        Terminal::Success("Frozen instance " + instName + " (snapshot " + ts + ")");
+        if (!spawnName.isEmpty()) {
+            Terminal::Success("Soft-frozen " + instName + ":" + spawnName + " (snapshot " + ts + ")");
+        } else if (isSoft) {
+            Terminal::Success("Soft-frozen instance " + instName + " (snapshot " + ts + ")");
+        } else {
+            Terminal::Success("Frozen instance " + instName + " (snapshot " + ts + ")");
+        }
         return 0;
     }
-    Terminal::Error("Failed to freeze instance " + instName);
+    Terminal::Error("Failed to freeze " + spec);
     return 1;
 }
 
@@ -1126,7 +1731,7 @@ static int cmdCat(Command &args) {
     resolveTerminalSize(colOpt, rowOpt, cols, rows);
 
     int historyLines = 1000000;
-    auto optHist = args.option("--history -h");
+    auto &optHist = args.option("--history -h");
     if (!optHist.string().isEmpty() && optHist.string() != "false") {
         String val = optHist.string();
         if (val == "true" || val == "all") historyLines = 1000000;
@@ -1166,7 +1771,7 @@ static int cmdAttach(Command &args) {
     resolveTerminalSize(colOpt, rowOpt, cols, rows);
 
     int historyLines = 1000000;
-    auto optHist = args.option("--history -h");
+    auto &optHist = args.option("--history -h");
     if (!optHist.string().isEmpty() && optHist.string() != "false") {
         String val = optHist.string();
         if (val == "true" || val == "all") historyLines = 1000000;
@@ -1394,6 +1999,20 @@ static int cmdInspect(Command &args) {
     if (name.isEmpty()) {
         Terminal::Fatal("tau inspect: no instance specified");
         return 1;
+    }
+
+    if (name.endsWith(".yml") || name.endsWith(".yaml") || (pathExists(name) && !isDir(name))) {
+        Array<String> visited;
+        ParseError perr;
+        ParsedManifest pm = Manifest::load(name, visited, perr);
+        if (perr.ok) {
+            String content = Manifest::toYAML(pm.directives);
+            ::fputs(content.c_str(), stdout);
+            return 0;
+        } else {
+            Terminal::Error("Failed to parse manifest: " + perr.message);
+            return 1;
+        }
     }
 
     String instName, spawnName;
@@ -1627,7 +2246,136 @@ static int cmdMonitor(Command &args) {
     return Monitor::runListener(regexPattern, powerEvents, ipEvents, allowNewer);
 }
 
+// ─── tau do-instance (internal) ───────────────────────────────────────────────
 
+static int cmdDoInstance(Command &args, Command *rootArgs = nullptr) {
+    String name         = args.option("--name -n").string();
+    String manifestOpt  = args.option("--manifest -m").string();
+    String srcManifest  = args.option("--source-manifest").string();
+    String workDir      = args.option("--workdir -w").string();
+    String headOpt      = args.option("--head").string();
+    String enterOpt     = args.option("--enter").string();
+    if (enterOpt.isEmpty() && rootArgs && rootArgs != &args) {
+        enterOpt = rootArgs->option("--enter").string();
+    }
+    bool   headless     = args.flag("--headless") || (rootArgs && rootArgs != &args && rootArgs->flag("--headless"));
+    bool   noCopy       = args.flag("--no-copy");
+    bool   copyYaml     = !noCopy && args.option("--copy").defaults("true").boolean();
+    bool   noWatch      = args.flag("--no-watch");
+    bool   watch        = !noWatch && args.option("--watch").defaults("true").boolean();
+    bool   remove_      = args.flag("--remove -r") || (rootArgs && rootArgs != &args && rootArgs->flag("--remove -r"));
+    bool   global_      = args.flag("--global -g") || (rootArgs && rootArgs != &args && rootArgs->flag("--global -g"));
+    bool   detach       = args.flag("--detach -d");
+    bool   attachStdin  = args.flag("--attach-stdin");
+    String detachKey    = args.option("--detach-key -k").defaults("ctrl+b").string();
+    String colOpt       = args.option("--col").defaults("auto").string();
+    String rowOpt       = args.option("--row").defaults("auto").string();
+    bool   debug        = args.flag("--debug -v");
+    if (debug) g_debugMode = true;
+
+    Array<String> entries;
+    Array<String> extraArgs;
+    bool afterDashDash = false;
+    Array<String> cmds = args.commands();
+    for (size_t i = 0; i < cmds.length(); ++i) {
+        String p = cmds[i];
+        if (p.isEmpty()) continue;
+        if (p == "--") {
+            afterDashDash = true;
+            continue;
+        }
+        if (afterDashDash) {
+            extraArgs.push(p);
+        } else {
+            entries.push(p);
+        }
+    }
+    for (size_t gi = 0; gi < g_rawExtraArgs.length(); ++gi) {
+        extraArgs.push(g_rawExtraArgs[gi]);
+    }
+    if (entries.length() == 0 && !manifestOpt.isEmpty()) {
+        entries.push(manifestOpt);
+    }
+
+    if (entries.length() == 0) {
+        logError("tau do-instance: at least one manifest entry is required");
+        return 1;
+    }
+
+    Config::init();
+    Config::ensureLayout();
+
+    if (name.isEmpty()) {
+        // Try reading name from the last entry
+        Array<String> visited;
+        ParseError perr;
+        ParsedManifest pm = Manifest::load(entries[entries.length() - 1], visited, perr);
+        if (perr.ok && !pm.meta.name.isEmpty()) {
+            name = pm.meta.name;
+        } else {
+            name = "0";
+        }
+    }
+
+    String resolvedHead;
+    if (!headOpt.isEmpty()) {
+        resolvedHead = headOpt;
+        resolvedHead = resolvedHead.replace("NAME", name).replace("%name", name).replace("{NAME}", name);
+        if (resolvedHead.endsWith("/")) resolvedHead = resolvedHead.substring(0, resolvedHead.length() - 1);
+    } else {
+        resolvedHead = Config::instanceDir(name);
+    }
+
+    if (!workDir.isEmpty()) {
+        (void)::chdir(workDir.c_str());
+    }
+
+    if (debug) {
+        String logFile = resolvedHead + "/spawn.log";
+        int lfd = ::open(logFile.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (lfd >= 0) {
+            ::dup2(lfd, STDERR_FILENO);
+            ::dup2(lfd, STDOUT_FILENO);
+            ::close(lfd);
+        }
+    }
+
+    SpawnOptions opts;
+    opts.instanceName       = name;
+    opts.instanceDir        = resolvedHead;
+    opts.headDir            = resolvedHead;
+    opts.manifestPaths      = entries;
+    opts.manifestPath       = entries[entries.length() - 1];
+    opts.sourceManifestPath = srcManifest;
+    opts.enterSlot          = enterOpt;
+    opts.headless           = headless || remove_;
+    opts.removeOnRead       = remove_;
+    opts.globalMode         = global_;
+    opts.copyYaml           = copyYaml;
+    opts.watch              = watch;
+    opts.args               = extraArgs;
+    opts.attachStdin        = attachStdin;
+    opts.detach             = detach;
+    opts.detachKey          = detachKey;
+
+    if (!colOpt.isEmpty() && colOpt != "auto") {
+        opts.cols = (int)Collection::parseLong(colOpt);
+    }
+    if (!rowOpt.isEmpty() && rowOpt != "auto") {
+        opts.rows = (int)Collection::parseLong(rowOpt);
+    }
+
+    SpawnProcess sp(opts);
+    return sp.run();
+}
+
+// ─── tau do-store (internal) ──────────────────────────────────────────────────
+
+static int cmdDoStore() {
+    Config::init();
+    Config::ensureLayout();
+    return Store::run();
+}
 
 // ─── main ─────────────────────────────────────────────────────────────────────
 
@@ -1636,27 +2384,56 @@ int main(int argc, char **argv) {
     Tau::Config::init();
     Tau::Config::ensureLayout();
 
+    g_rawExtraArgs.clear();
+    bool foundDashDash = false;
+    for (int ai = 1; ai < argc; ++ai) {
+        if (foundDashDash) {
+            g_rawExtraArgs.push(String(argv[ai]));
+        } else if (::strcmp(argv[ai], "--") == 0) {
+            foundDashDash = true;
+        }
+    }
 
     Command args(argc, argv);
     args
         .description("tau — package manager and containerization engine")
         .version(TAU_VERSION);
 
-    bool isTgh = (argc > 0 && ::strstr(argv[0], "tgh") != nullptr);
+    String progName = argv[0] ? String(argv[0]) : "";
+    long long lastSlash = rfind(progName, '/');
+    if (lastSlash >= 0) progName = progName.substring((size_t)lastSlash + 1);
 
-    if (isTgh) {
+    if (progName == "tgh") {
+        bool global = args.flag("--global");
+        String target = args.option("--target").string();
         Array<String> repos;
         for (size_t i = 0; ; ++i) {
             String p = args[i];
             if (p.isEmpty()) break;
             repos.push(p);
         }
-        return cmdGitHub(repos, "", false);
+        return cmdGitHub(repos, target, global);
+    }
+
+    if (progName == "tr") {
+        return cmdRun(args, /*defaultHeadless=*/true);
+    }
+
+    if (progName == "tstart") {
+        return cmdRun(args, /*defaultHeadless=*/false);
     }
 
     if (args.flag("--version -v")) {
         ::puts(("tau " + String(TAU_VERSION)).c_str());
         return 0;
+    }
+
+    String primaryCmd = args.primary();
+    if (primaryCmd == "do-instance" || primaryCmd == "doinstance") {
+        return cmdDoInstance(args.command("do-instance doinstance"), &args);
+    }
+    if (primaryCmd == "do-store" || primaryCmd == "dostore") {
+        return cmdDoStore();
     }
 
     if (args.primary().isEmpty() || args.primary() == "help" || args.flag("--help")) {
@@ -1665,10 +2442,16 @@ int main(int argc, char **argv) {
             "  " + Terminal::Cyan("tau init") + "                       Create tau.yml in cwd and register it\n"
             "  " + Terminal::Cyan("tau add [manifest]") + "             Register a manifest with the store\n"
             "  " + Terminal::Cyan("tau remove <manifest>") + "          Remove a manifest from the store\n"
+            "  " + Terminal::Cyan("tau enable <entries...>") + "        Enable manifest entries in a list (--name,-n, --copy,-c, --now,-o, --list,-l)\n"
+            "  " + Terminal::Cyan("tau disable [name]") + "             Disable manifest or stop whole list (--name,-n, --regex, --stop,-s, --list,-l)\n"
+            "  " + Terminal::Cyan("tau do-list") + "                    Run enrolled items in list once per boot/session (--list,-l, --regardless,-r)\n"
             "  " + Terminal::Cyan("tau activate [manifest]") + "        Output shell command to prepend bindir to PATH\n"
             "  " + Terminal::Cyan("tau github <user/repo>")  + "         Add a GitHub dependency\n"
             "  " + Terminal::Cyan("tgh <user/repo>")          + "         Shorthand for tau github\n"
-            "  " + Terminal::Cyan("tau run <manifest>")       + "         Run an instance\n"
+            "  " + Terminal::Cyan("tau start <manifest|bin>") + "         Run an instance with a head directory (watches & persists)\n"
+            "  " + Terminal::Cyan("tstart <manifest|bin>")    + "         Shorthand for tau start\n"
+            "  " + Terminal::Cyan("tau run <manifest|bin>")   + "         Run an instance headless (ephemeral & lightweight)\n"
+            "  " + Terminal::Cyan("tr <manifest|bin>")        + "         Shorthand for tau run\n"
             "  " + Terminal::Cyan("tau cat <name[:spawn]>")   + "         Stream output, view history, or attach stdin\n"
             "  " + Terminal::Cyan("tau stop <name[:spawn]>")  + "         Stop a spawn or instance\n"
             "  " + Terminal::Cyan("tau snapshot <name>")      + "         Take snapshot of memory & sockets\n"
@@ -1698,6 +2481,18 @@ int main(int argc, char **argv) {
         return cmdRemove(path);
     }
 
+    if (cmd == "enable") {
+        return cmdEnable(args.command("enable"));
+    }
+
+    if (cmd == "disable") {
+        return cmdDisable(args.command("disable"));
+    }
+
+    if (cmd == "do-list" || cmd == "dolist") {
+        return cmdDoList(args.command("do-list dolist"));
+    }
+
     if (cmd == "activate") {
         Command &activateCmd = args.command("activate");
         String path = activateCmd[0];
@@ -1717,7 +2512,8 @@ int main(int argc, char **argv) {
         return cmdGitHub(repos, target, global);
     }
 
-    if (cmd == "run")      return cmdRun     (args.command("run"));
+    if (cmd == "run")      return cmdRun     (args.command("run"),   /*defaultHeadless=*/true,  &args);
+    if (cmd == "start")    return cmdRun     (args.command("start"), /*defaultHeadless=*/false, &args);
     if (cmd == "attach")   return cmdAttach  (args.command("attach"));
     if (cmd == "stop")     return cmdStop    (args.command("stop"));
     if (cmd == "snapshot") return cmdSnapshot(args.command("snapshot"));
@@ -1726,6 +2522,12 @@ int main(int argc, char **argv) {
     if (cmd == "inspect")  return cmdInspect (args.command("inspect"));
     if (cmd == "ls")       return cmdLs      (args.command("ls"));
     if (cmd == "monitor")  return cmdMonitor (args.command("monitor"));
+    if (cmd == "do-instance" || cmd == "doinstance") {
+        return cmdDoInstance(args.command("do-instance doinstance"), &args);
+    }
+    if (cmd == "do-store" || cmd == "dostore") {
+        return cmdDoStore();
+    }
 
     Terminal::Error("Unknown command: " + cmd);
     Terminal::Info("Run `tau --help` for usage.");

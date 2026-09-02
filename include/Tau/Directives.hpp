@@ -30,6 +30,8 @@ using DirectiveList = Array<Directive *>;
 enum class DirectiveKind {
     // Timing
     Wait,
+    NoWait,
+    WaitAll,
     WaitExit,
     Retry,
 
@@ -41,9 +43,11 @@ enum class DirectiveKind {
     Memory,
     CPUSet,
     CPU,
+    Autofreeze,
     Chroot,
     Isolate,
     Veth,
+    Route,
 
     IP,
     NewNet,
@@ -51,6 +55,16 @@ enum class DirectiveKind {
     Macvlan,
     IPVlan,
     Bridge,
+
+    // Permissions and FS Restrictions
+    NoRead,
+    NoWrite,
+    NoExecute,
+    NoMount,
+    NoWatch,
+
+    // Synchronization & Events
+    Trigger,
 
     // Filesystem
 
@@ -100,6 +114,9 @@ enum class DirectiveKind {
 
     // Packaging
     Slot,
+    ESlot,
+    NoESlot,
+    Entry,
     Bin,
     BinDir,
 };
@@ -112,10 +129,35 @@ struct Directive {
 };
 
 // ─── Wait ─────────────────────────────────────────────────────────────────────
-/// `- wait: 1.5s`
+/// `- wait: 1.5s` or `- wait: spawn_name` or `- wait: [s1, s2]` or `- wait: regex`
 struct DWait : Directive {
     double seconds = 0.0;
+    Array<String> targets;  ///< Named wait units or triggers, or regex pattern
+    bool isGlobal = false;  ///< Search globally across instances
     DWait() : Directive(DirectiveKind::Wait) {}
+};
+
+// ─── Trigger ──────────────────────────────────────────────────────────────────
+/// `- trigger: my_trigger`
+struct DTrigger : Directive {
+    String name;
+    DTrigger() : Directive(DirectiveKind::Trigger) {}
+};
+
+// ─── NoWait ───────────────────────────────────────────────────────────────────
+/// `- nowait:` with a child block of directives (masks all outside waits)
+struct DNoWait : Directive {
+    DirectiveList children;
+    DNoWait() : Directive(DirectiveKind::NoWait) {}
+    ~DNoWait() { for (auto *d : children) delete d; }
+};
+
+// ─── WaitAll ──────────────────────────────────────────────────────────────────
+/// `- waitall:` with a child block of directives (automatically waits for all passive waits spawned here after directives finish)
+struct DWaitAll : Directive {
+    DirectiveList children;
+    DWaitAll() : Directive(DirectiveKind::WaitAll) {}
+    ~DWaitAll() { for (auto *d : children) delete d; }
 };
 
 // ─── WaitExit ─────────────────────────────────────────────────────────────────
@@ -186,6 +228,21 @@ struct DCPU : Directive {
     DCPU() : Directive(DirectiveKind::CPU) {}
 };
 
+/**
+ * `- autofreeze:`
+ * `    wol: true`
+ * `    cpu_threshold: 5%`
+ * `    timer: 20s`
+ */
+struct DAutofreeze : Directive {
+    bool   enabled      = true;
+    bool   wol          = true;
+    double cpuThreshold = 5.0;  ///< in percentage
+    double timerSeconds = 20.0;
+    String rawTimer     = "20s";
+    DAutofreeze() : Directive(DirectiveKind::Autofreeze) {}
+};
+
 // ─── Chroot ───────────────────────────────────────────────────────────────────
 /// `- chroot: ./path/to/rootfs`
 struct DChroot : Directive {
@@ -204,14 +261,54 @@ struct DIsolate : Directive {
 // ─── Networking ───────────────────────────────────────────────────────────────
 /**
  * `- veth:`
- * `    name: veth_host`
- * `    peer: veth_container`
+ * `    source: veth_%name`
+ * `    sip: 192.168.10.1`    # optional source IP
+ * `    target: eth0`
+ * `    ip: 192.168.10.10`    # optional target IP
  */
 struct DVeth : Directive {
+    String source;      ///< host/source interface name (renamed from hostName)
+    String target;      ///< peer/target interface name (renamed from peerName)
+    String sip;         ///< optional source-ip / host-ip
+    String ip;          ///< optional target-ip / peer-ip
+
+    // Compatibility aliases
     String hostName;
     String peerName;
+
     DVeth() : Directive(DirectiveKind::Veth) {}
 };
+
+struct RouteHop {
+    String ip;
+    String link;
+    int    weight = 1;
+};
+
+/**
+ * `- route: default`
+ * `  via:`
+ * `    - ip: 192.168.10.1`
+ * `      link: eth0`
+ * `      weight: 1`
+ */
+struct DRoute : Directive {
+    String destination = "default";
+    Array<RouteHop> hops;
+    DRoute() : Directive(DirectiveKind::Route) {}
+};
+
+// ─── Path Restrictions ────────────────────────────────────────────────────────
+struct DPathRestriction : Directive {
+    Array<String> paths;
+    explicit DPathRestriction(DirectiveKind k) : Directive(k) {}
+};
+
+struct DNoRead    : DPathRestriction { DNoRead()    : DPathRestriction(DirectiveKind::NoRead)    {} };
+struct DNoWrite   : DPathRestriction { DNoWrite()   : DPathRestriction(DirectiveKind::NoWrite)   {} };
+struct DNoExecute : DPathRestriction { DNoExecute() : DPathRestriction(DirectiveKind::NoExecute) {} };
+struct DNoMount   : DPathRestriction { DNoMount()   : DPathRestriction(DirectiveKind::NoMount)   {} };
+struct DNoWatch   : DPathRestriction { DNoWatch()   : DPathRestriction(DirectiveKind::NoWatch)   {} };
 
 /// `- ip: command`  (executes ip(8) in current namespace)
 struct DIP : Directive {
@@ -578,6 +675,55 @@ struct DLanguages   : DMetaString { DLanguages()   : DMetaString(DirectiveKind::
 /// `- slot: true`
 struct DSlot : Directive {
     DSlot() : Directive(DirectiveKind::Slot) {}
+};
+
+/**
+ * `- eslot: <name>`
+ * `  slot: false` (default false)
+ * `  entry:` (optional verification directives)
+ * `    - var: ...`
+ * `    - spawn: ...`
+ * `  escape:` (optional fallback/escape injection)
+ */
+struct DESlot : Directive {
+    String        name;
+    bool          slot = false;
+    DirectiveList entry;
+    DirectiveList escape;
+    DirectiveList inject;
+    DESlot() : Directive(DirectiveKind::ESlot) {}
+    ~DESlot() {
+        for (auto *d : entry) delete d;
+        for (auto *d : escape) delete d;
+        for (auto *d : inject) delete d;
+    }
+};
+
+/**
+ * `- noeslot: true|false|[exceptions]`
+ * Disables / blocks eslot entry matching across parents / instances.
+ * If boolean true: blocks ALL eslots.
+ * If boolean false: blocks NO eslots (default).
+ * If list of strings / names: blocks all EXCEPT the specified names.
+ */
+struct DNoESlot : Directive {
+    bool          enabled = true;      ///< When true, blocks eslots
+    Array<String> exceptions;          ///< Allowed eslot names when enabled
+    DNoESlot() : Directive(DirectiveKind::NoESlot) {}
+};
+
+/**
+ * `- entry: <name>`
+ * `  inject:`
+ * `    - spawn: touch yay_sudo.txt`
+ */
+struct DEntry : Directive {
+    String        name;
+    DirectiveList inject;
+    DEntry() : Directive(DirectiveKind::Entry) {}
+    ~DEntry() {
+        for (auto *d : inject) delete d;
+    }
 };
 
 /**
