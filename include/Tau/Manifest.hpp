@@ -14,14 +14,13 @@
 #pragma once
 
 #include "Directives.hpp"
-#include <Collection/String.hpp>
-#include <Collection/Array.hpp>
-#include <Collection/Map.hpp>
-#include <Collection/Tree.hpp>
+#include <Xi/String.hpp>
+#include <Xi/Array.hpp>
+#include <Xi/Map.hpp>
+#include <Xi/Tree.hpp>
 
 namespace Tau {
 
-using namespace Collection;
 using namespace Xi;
 
 // ─── Manifest metadata (populated from metadata directives) ───────────────────
@@ -138,12 +137,12 @@ public:
 
 private:
     // ─── Internal YAML-to-directive conversion ───────────────────────────────
-    static Directive *nodeToDirective(Collection::NodeBase *node,
+    static Directive *nodeToDirective(Xi::Node<void> *node,
                                       const String &basePath,
                                       Array<String> &visited,
                                       ParseError    &err);
 
-    static DirectiveList nodeListToDirectives(Collection::NodeBase *list,
+    static DirectiveList nodeListToDirectives(Xi::Node<void> *list,
                                               const String &basePath,
                                               Array<String> &visited,
                                               ParseError    &err);
@@ -152,9 +151,9 @@ private:
                               String &key,
                               String &value);
 
-    static String childString(Collection::NodeBase *node, const String &key,
+    static String childString(Xi::Node<void> *node, const String &key,
                               const String &def = "");
-    static bool   childBool  (Collection::NodeBase *node, const String &key,
+    static bool   childBool  (Xi::Node<void> *node, const String &key,
                               bool def = false);
 };
 

@@ -27,13 +27,12 @@
 
 #pragma once
 
-#include <Collection/String.hpp>
-#include <Collection/Array.hpp>
-#include <Collection/Map.hpp>
+#include <Xi/String.hpp>
+#include <Xi/Array.hpp>
+#include <Xi/Map.hpp>
 
 namespace Tau {
 
-using namespace Collection;
 using namespace Xi;
 
 // ─── Parsed GitHub coordinates ────────────────────────────────────────────────

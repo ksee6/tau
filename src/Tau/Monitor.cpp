@@ -6,7 +6,7 @@
 #include <Tau/Monitor.hpp>
 #include <Tau/Util.hpp>
 #include <Terminal/Format.hpp>
-#include <Encoding/Regex.hpp>
+#include <Data/Regex.hpp>
 
 #include <cerrno>
 #include <cstring>
@@ -36,7 +36,7 @@ static bool matchInstanceRegex(const String &pattern, const String &name) {
     if (pattern.isEmpty() || pattern == ".*" || pattern == "*") {
         return true;
     }
-    Encoding::Regex re(pattern);
+    Data::Regex re(pattern);
     if (re.parsed && re.matchAll(name, 1).length() > 0) {
         return true;
     }
@@ -166,7 +166,7 @@ int Monitor::runListener(const String &regexPattern,
 
         String eventType     = parts[0];
         String instanceName  = parts[1];
-        uint64_t startupTime = (uint64_t)Collection::parseLong(parts[2]);
+        uint64_t startupTime = (uint64_t)Xi::parseLong(parts[2]);
         String data;
         for (size_t p = 3; p < parts.length(); ++p) {
             if (!data.isEmpty()) data += " ";

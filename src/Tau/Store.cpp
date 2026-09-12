@@ -11,7 +11,7 @@
 #include <Tau/Util.hpp>
 
 #include <Resource/File.hpp>
-#include <Security/Crypto.hpp>
+#include <Sec/Hash.hpp>
 
 #include <cstdlib>
 #include <cerrno>
@@ -26,13 +26,13 @@
 
 namespace Tau {
 
-using namespace Collection;
+using namespace Xi;
 
 // ─── hashContent ──────────────────────────────────────────────────────────────
 
 String Store::hashContent(const String &content) {
     // BLAKE2b with 32-byte output → 64 hex chars
-    String raw = Security::hash(content, 32);
+    String raw = Sec::hash(content, 32);
     return hexEncode(raw);
 }
 
@@ -244,13 +244,13 @@ static void collectDirectivesHashes(const DirectiveList &directives,
             if (!gitUrl.startsWith("http://") && !gitUrl.startsWith("https://") && !gitUrl.startsWith("git@")) {
                 gitUrl = String("https://github.com/") + repo.owner + "/" + repo.repo + ".git";
             }
-            String hashName = "git_" + hexEncode(Security::hash(gitUrl + ":" + commit, 8));
+            String hashName = "git_" + hexEncode(Sec::hash(gitUrl + ":" + commit, 8));
             activeHashes.push(hashName);
         } else if (d->kind == DirectiveKind::Local) {
             auto *ld = static_cast<DLocal *>(d);
             String src = ld->source;
             if (!src.startsWith("/")) src = manifestDir + "/" + src;
-            String hashName = "local_" + hexEncode(Security::hash(src, 8));
+            String hashName = "local_" + hexEncode(Sec::hash(src, 8));
             activeHashes.push(hashName);
         } else if (d->kind == DirectiveKind::And || d->kind == DirectiveKind::Or ||
                    d->kind == DirectiveKind::Nand || d->kind == DirectiveKind::Nor ||

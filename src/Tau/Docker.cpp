@@ -9,7 +9,7 @@
 #include <Tau/Namespace.hpp>
 
 #include <Resource/File.hpp>
-#include <Security/Crypto.hpp>
+#include <Sec/Hash.hpp>
 
 #include <cstdlib>
 #include <cstdio>
@@ -21,7 +21,7 @@
 
 namespace Tau {
 
-using namespace Collection;
+using namespace Xi;
 
 // ─── parseImage ───────────────────────────────────────────────────────────────
 
@@ -101,7 +101,7 @@ bool Docker::fetchManifest(const String &registry,
                            const String &tag,
                            const String &token,
                            Array<String> &layerDigests) {
-    String cacheKey = "docker_" + hexEncode(Security::hash(registry + "/" + repository + ":" + tag, 8));
+    String cacheKey = "docker_" + hexEncode(Sec::hash(registry + "/" + repository + ":" + tag, 8));
     String cachePath = Config::githubCachePath() + "/" + cacheKey + ".json";
 
     Resource::LinuxFS fs;

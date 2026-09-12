@@ -7,11 +7,11 @@
 #include <Tau/Config.hpp>
 #include <Tau/Util.hpp>
 
-#include <Encoding/Yaml.hpp>
-#include <Encoding/Regex.hpp>
+#include <Data/Yaml.hpp>
+#include <Data/Regex.hpp>
 #include <Resource/File.hpp>
-#include <Security/Crypto.hpp>
-#include <Collection/Tree.hpp>
+#include <Sec/Hash.hpp>
+#include <Xi/Tree.hpp>
 
 #include <cstdlib>
 #include <cstring>
@@ -22,8 +22,9 @@
 
 namespace Tau {
 
-using namespace Encoding;
-using namespace Collection;
+using namespace Data;
+using namespace Xi;
+using namespace Sec;
 
 // ─── GHRepo::parse ────────────────────────────────────────────────────────────
 
@@ -54,7 +55,7 @@ bool GHRepo::parse(const String &spec, GHRepo &out) {
 
 String GitHub::cacheKey(const String &url) {
     // BLAKE2b-8 of url → 16 hex chars
-    String raw = Security::hash(url, 8);
+    String raw = Sec::hash(url, 8);
     return hexEncode(raw);
 }
 
@@ -170,7 +171,7 @@ String GitHub::selectTag(const Array<String> &tags, const String &expr) {
 
     if (expr.startsWith("reg ")) {
         String pattern = expr.substring(4);
-        Encoding::Regex re(pattern);
+        Data::Regex re(pattern);
         for (size_t i = 0; i < tags.length(); ++i) {
             if (re.matchAll(tags[i], 1).length() > 0) return tags[i];
         }
@@ -329,7 +330,7 @@ bool GitHub::cloneOrUpdate(const String &url, const String &commit,
                              const String &target, bool store) {
     if (store && !url.isEmpty()) {
         String storeDir = Config::storePath() + "/git_" +
-                          hexEncode(Security::hash(url + ":" + commit, 8));
+                          hexEncode(Sec::hash(url + ":" + commit, 8));
         struct stat st;
         bool storeExists = (::stat(storeDir.c_str(), &st) == 0 && S_ISDIR(st.st_mode));
         if (!storeExists) {

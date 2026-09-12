@@ -1,11 +1,10 @@
 #pragma once
 
-#include <Collection/String.hpp>
-#include <Collection/Array.hpp>
+#include <Xi/String.hpp>
+#include <Xi/Array.hpp>
 
 namespace Tau {
 
-using namespace Collection;
 using namespace Xi;
 
 // ─── Version ──────────────────────────────────────────────────────────────────

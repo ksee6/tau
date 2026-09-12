@@ -18,7 +18,7 @@
 #include <Terminal/Command.hpp>
 #include <Terminal/Format.hpp>
 #include <Resource/File.hpp>
-#include <Encoding/Regex.hpp>
+#include <Data/Regex.hpp>
 
 #include <cstdlib>
 #include <cstring>
@@ -35,7 +35,7 @@
 
 using namespace Terminal;
 using namespace Tau;
-using namespace Collection;
+using namespace Xi;
 
 static Array<String> g_rawExtraArgs;
 
@@ -60,11 +60,11 @@ static void resolveTerminalSize(const String &colOpt, const String &rowOpt, int 
     }
 
     if (!colOpt.isEmpty() && colOpt != "auto") {
-        long long c = Collection::parseLong(colOpt);
+        long long c = Xi::parseLong(colOpt);
         if (c > 0) outCols = (int)c;
     }
     if (!rowOpt.isEmpty() && rowOpt != "auto") {
-        long long r = Collection::parseLong(rowOpt);
+        long long r = Xi::parseLong(rowOpt);
         if (r > 0) outRows = (int)r;
     }
 }
@@ -2066,7 +2066,7 @@ static bool matchInstanceRegex(const String &pattern, const String &name) {
     if (pattern.isEmpty() || pattern == ".*" || pattern == "*") {
         return true;
     }
-    Encoding::Regex re(pattern);
+    Data::Regex re(pattern);
     if (re.parsed && re.matchAll(name, 1).length() > 0) {
         return true;
     }
@@ -2359,10 +2359,10 @@ static int cmdDoInstance(Command &args, Command *rootArgs = nullptr) {
     opts.detachKey          = detachKey;
 
     if (!colOpt.isEmpty() && colOpt != "auto") {
-        opts.cols = (int)Collection::parseLong(colOpt);
+        opts.cols = (int)Xi::parseLong(colOpt);
     }
     if (!rowOpt.isEmpty() && rowOpt != "auto") {
-        opts.rows = (int)Collection::parseLong(rowOpt);
+        opts.rows = (int)Xi::parseLong(rowOpt);
     }
 
     SpawnProcess sp(opts);

@@ -12,8 +12,8 @@
 #include <Tau/Util.hpp>
 
 #include <Resource/File.hpp>
-#include <Encoding/Regex.hpp>
-#include <Security/Crypto.hpp>
+#include <Data/Regex.hpp>
+#include <Sec/Hash.hpp>
 
 #include <cerrno>
 #include <cstring>
@@ -1604,7 +1604,7 @@ bool Runner::execImage(const DImage &d) {
         return true;
     }
 
-    String baseDir = "/tmp/tau_img_" + hexEncode(Security::hash(imagePath, 8));
+    String baseDir = "/tmp/tau_img_" + hexEncode(Sec::hash(imagePath, 8));
     mkdirP(baseDir);
     _tempDirs.push(baseDir);
     _imagePaths.push(imagePath);
@@ -1910,7 +1910,7 @@ bool Runner::execLocal(const DLocal &d) {
     if (useStore) {
         // Copy source into store directory and symlink/copy to target
         String storeDir = Config::storePath() + "/local_" +
-                          hexEncode(Security::hash(src, 8));
+                          hexEncode(Sec::hash(src, 8));
         fs.mkdir(storeDir);
         ok = copyRecursive(src, storeDir);
         if (ok && !d.target.isEmpty()) {
@@ -1969,7 +1969,7 @@ bool Runner::execGit(const DGit &d) {
     bool useStore = _opts.storeMode && d.store;
 
     if (useStore) {
-        String storeDir = Config::storePath() + "/git_" + hexEncode(Security::hash(gitUrl + ":" + commit, 8));
+        String storeDir = Config::storePath() + "/git_" + hexEncode(Sec::hash(gitUrl + ":" + commit, 8));
         ok = GitHub::cloneOrUpdate(gitUrl, commit, storeDir, true);
 
         if (ok && !target.isEmpty()) {
@@ -2036,12 +2036,12 @@ bool Runner::execGHRelease(const DGHRelease &d) {
     }
 
     // Match asset by name (supports regex)
-    Encoding::Regex nameRe(d.name);
+    Data::Regex nameRe(d.name);
     for (size_t i = 0; i < release.assets.length(); ++i) {
         const GHAsset &asset = release.assets[i];
         bool match = false;
         if (d.name.startsWith("reg ")) {
-            Encoding::Regex re(d.name.substring(4));
+            Data::Regex re(d.name.substring(4));
             match = re.matchAll(asset.name, 1).length() > 0;
         } else {
             match = (asset.name == d.name);
@@ -2107,7 +2107,7 @@ bool Runner::execVar(const DVarBase &d) {
     Array<String> keys;
 
     if (d.keyIsRegex) {
-        Encoding::Regex re(d.key);
+        Data::Regex re(d.key);
         for (auto &entry : _vars) {
             if (entry.key.isEmpty()) continue;
             if (re.matchAll(entry.key, 1).length() > 0) {
@@ -2163,26 +2163,26 @@ bool Runner::execVar(const DVarBase &d) {
                 break;
 
             case VarOp::CheckRegex: {
-                Encoding::Regex re(interp(d.value));
+                Data::Regex re(interp(d.value));
                 result = re.matchAll(curVal, 1).length() > 0;
                 break;
             }
 
             case VarOp::CheckGT:
-                result = Collection::parseDouble(curVal) >
-                         Collection::parseDouble(interp(d.value));
+                result = Xi::parseDouble(curVal) >
+                         Xi::parseDouble(interp(d.value));
                 break;
             case VarOp::CheckGTE:
-                result = Collection::parseDouble(curVal) >=
-                         Collection::parseDouble(interp(d.value));
+                result = Xi::parseDouble(curVal) >=
+                         Xi::parseDouble(interp(d.value));
                 break;
             case VarOp::CheckLT:
-                result = Collection::parseDouble(curVal) <
-                         Collection::parseDouble(interp(d.value));
+                result = Xi::parseDouble(curVal) <
+                         Xi::parseDouble(interp(d.value));
                 break;
             case VarOp::CheckLTE:
-                result = Collection::parseDouble(curVal) <=
-                         Collection::parseDouble(interp(d.value));
+                result = Xi::parseDouble(curVal) <=
+                         Xi::parseDouble(interp(d.value));
                 break;
         }
 
@@ -2206,7 +2206,7 @@ bool Runner::execNewVar(const DNewVar &d) {
                 keep = true;
                 break;
             }
-            Encoding::Regex re(d.patterns[pi]);
+            Data::Regex re(d.patterns[pi]);
             if (re.matchAll(k, 1).length() > 0) {
                 keep = true;
                 break;
@@ -2234,7 +2234,7 @@ bool Runner::execRmVar(const DRmVar &d) {
                 removeKey = true;
                 break;
             }
-            Encoding::Regex re(d.patterns[pi]);
+            Data::Regex re(d.patterns[pi]);
             if (re.matchAll(k, 1).length() > 0) {
                 removeKey = true;
                 break;

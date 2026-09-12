@@ -7,9 +7,9 @@
 #include <Tau/Config.hpp>
 #include <Tau/Util.hpp>
 
-#include <Encoding/Yaml.hpp>
+#include <Data/Yaml.hpp>
 #include <Resource/File.hpp>
-#include <Collection/Tree.hpp>
+#include <Xi/Tree.hpp>
 
 #include <cerrno>
 #include <cstring>
@@ -21,8 +21,8 @@
 
 namespace Tau {
 
-using namespace Encoding;
-using namespace Collection;
+using namespace Data;
+using namespace Xi;
 
 // ─── SpawnState ───────────────────────────────────────────────────────────────
 

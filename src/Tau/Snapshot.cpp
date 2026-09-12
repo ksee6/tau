@@ -6,7 +6,7 @@
 #include <Tau/Snapshot.hpp>
 #include <Tau/Cgroup.hpp>
 #include <Tau/Util.hpp>
-#include <Encoding/Yaml.hpp>
+#include <Data/Yaml.hpp>
 #include <Resource/File.hpp>
 
 #include <vector>
@@ -54,7 +54,7 @@
 
 namespace Tau {
 
-using namespace Encoding;
+using namespace Data;
 
 static String generateTimestamp() {
     struct timespec ts;
@@ -171,8 +171,8 @@ static void dumpProcessMemory(pid_t pid,
         unsigned long long inode = 0;
         char pathname[512] = {};
 
-        int scanned = ::sscanf(line, "%lx-%lx %15s %llx %x:%x %llu %511[^\n]",
-                               &start, &end, perms, &offset, &devMajor, &devMinor, &inode, pathname);
+        int scanned = ::sscanf(line, "%llx-%llx %15s %llx %x:%x %llu %511[^\n]",
+                               (unsigned long long *)&start, (unsigned long long *)&end, perms, &offset, &devMajor, &devMinor, &inode, pathname);
         if (scanned < 3) continue;
 
         String pathStr(pathname);

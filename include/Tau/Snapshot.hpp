@@ -6,16 +6,15 @@
 #pragma once
 
 #include "Instance.hpp"
-#include <Collection/String.hpp>
-#include <Collection/Array.hpp>
-#include <Collection/Map.hpp>
+#include <Xi/String.hpp>
+#include <Xi/Array.hpp>
+#include <Xi/Map.hpp>
 
 #include <cstdint>
 #include <sys/types.h>
 
 namespace Tau {
 
-using namespace Collection;
 using namespace Xi;
 
 struct MemorySegment {

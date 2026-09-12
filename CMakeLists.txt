@@ -1,22 +1,27 @@
 cmake_minimum_required(VERSION 3.14)
 
+if(POLICY CMP0135)
+    cmake_policy(SET CMP0135 NEW)
+endif()
+
 option(TAU_STATIC "Build tau as a fully static binary" ON)
 option(TAU_MUSL   "Fetch and use local musl toolchain in build/ for static build" ON)
 
 if(TAU_MUSL)
     set(TAU_STATIC ON CACHE BOOL "" FORCE)
     include(FetchContent)
-    message(STATUS "Fetching musl native toolchain into build/ ...")
+    message(STATUS "Fetching musl i686 toolchain into build/ ...")
     FetchContent_Declare(
         musl_toolchain
-        URL https://musl.cc/x86_64-linux-musl-native.tgz
+        URL https://musl.cc/i686-linux-musl-cross.tgz
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     )
     FetchContent_MakeAvailable(musl_toolchain)
     set(MUSL_BIN_DIR "${musl_toolchain_SOURCE_DIR}/bin")
-    if(EXISTS "${MUSL_BIN_DIR}/x86_64-linux-musl-gcc")
-        message(STATUS "Using musl-gcc: ${MUSL_BIN_DIR}/x86_64-linux-musl-gcc")
-        set(CMAKE_C_COMPILER   "${MUSL_BIN_DIR}/x86_64-linux-musl-gcc" CACHE FILEPATH "" FORCE)
-        set(CMAKE_CXX_COMPILER "${MUSL_BIN_DIR}/x86_64-linux-musl-g++" CACHE FILEPATH "" FORCE)
+    if(EXISTS "${MUSL_BIN_DIR}/i686-linux-musl-gcc")
+        message(STATUS "Using musl-gcc: ${MUSL_BIN_DIR}/i686-linux-musl-gcc")
+        set(CMAKE_C_COMPILER   "${MUSL_BIN_DIR}/i686-linux-musl-gcc" CACHE FILEPATH "" FORCE)
+        set(CMAKE_CXX_COMPILER "${MUSL_BIN_DIR}/i686-linux-musl-g++" CACHE FILEPATH "" FORCE)
     endif()
 endif()
 
@@ -27,7 +32,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # ─── Compiler flags ───────────────────────────────────────────────────────────
 if(UNIX AND NOT APPLE)
-    add_compile_options(-fstack-protector-strong)
+    add_compile_options(-fstack-protector-strong -m32 -march=i686 -mno-avx -mno-avx2 -mno-fma)
 endif()
 
 # ─── Locate xic ───────────────────────────────────────────────────────────────

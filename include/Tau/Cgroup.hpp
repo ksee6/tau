@@ -19,13 +19,12 @@
 
 #pragma once
 
-#include <Collection/String.hpp>
+#include <Xi/String.hpp>
 
 #include <sys/types.h>
 
 namespace Tau {
 
-using namespace Collection;
 using namespace Xi;
 
 class Cgroup {

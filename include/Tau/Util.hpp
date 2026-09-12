@@ -8,9 +8,9 @@
 
 #pragma once
 
-#include <Collection/String.hpp>
-#include <Collection/Tree.hpp>
-#include <Xi/Log.hpp>
+#include <Xi/String.hpp>
+#include <Xi/Tree.hpp>
+#include <Debug/Log.hpp>
 
 #include <initializer_list>
 #include <cctype>
@@ -24,7 +24,6 @@
 
 namespace Tau {
 
-using namespace Collection;
 using namespace Xi;
 
 // ─── Integer → String ─────────────────────────────────────────────────────────
@@ -175,26 +174,28 @@ inline bool mkdirP(const String &path, mode_t mode = 0755) {
 
 // ─── YAML node helpers ────────────────────────────────────────────────────────
 
+using NodeBase = Xi::Node<void>;
+
 /// Get a string value from a named child of a NodeBase.
-inline String yamlChildString(const Collection::NodeBase *node,
+inline String yamlChildString(const NodeBase *node,
                                const String &key,
                                const String &def = "") {
     if (!node) return def;
-    const Collection::NodeBase *child = node->get(key);
+    const NodeBase *child = node->get(key);
     if (!child) return def;
-    if (auto *n = dynamic_cast<const Collection::Node<String> *>(child))
+    if (auto *n = dynamic_cast<const Node<String> *>(child))
         return n->value;
-    if (auto *n = dynamic_cast<const Collection::Node<long long> *>(child))
+    if (auto *n = dynamic_cast<const Node<long long> *>(child))
         return intStr(n->value);
-    if (auto *n = dynamic_cast<const Collection::Node<int> *>(child))
+    if (auto *n = dynamic_cast<const Node<int> *>(child))
         return intStr(n->value);
-    if (auto *n = dynamic_cast<const Collection::Node<size_t> *>(child))
+    if (auto *n = dynamic_cast<const Node<size_t> *>(child))
         return intStr(n->value);
     return def;
 }
 
 /// Get a boolean value from a named child of a NodeBase.
-inline bool yamlChildBool(const Collection::NodeBase *node,
+inline bool yamlChildBool(const NodeBase *node,
                            const String &key,
                            bool def = false) {
     String val = yamlChildString(node, key, "");

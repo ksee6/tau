@@ -7,10 +7,10 @@
 #include <Tau/Config.hpp>
 #include <Tau/Util.hpp>
 
-#include <Encoding/Yaml.hpp>
-#include <Encoding/Regex.hpp>
+#include <Data/Yaml.hpp>
+#include <Data/Regex.hpp>
 #include <Resource/File.hpp>
-#include <Collection/Tree.hpp>
+#include <Xi/Tree.hpp>
 
 #include <cmath>
 #include <cerrno>
@@ -19,8 +19,8 @@
 
 namespace Tau {
 
-using namespace Encoding;
-using namespace Collection;
+using namespace Data;
+using namespace Xi;
 
 // ─── YAML node helpers ────────────────────────────────────────────────────────
 
@@ -165,7 +165,7 @@ VarOp Manifest::parseVarOp(const String &expr, String &key, String &value) {
     return VarOp::Assign;
 }
 
-static NodeBase *findNamedNode(NodeBase *node) {
+[[maybe_unused]] static NodeBase *findNamedNode(NodeBase *node) {
     if (!node) return nullptr;
     if (!node->getName().isEmpty()) return node;
 

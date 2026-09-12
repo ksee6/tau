@@ -652,19 +652,19 @@ bool Namespace::setupForwarding(const DForward &d) {
 
     if (srcDash >= 0 && dstDash < 0) {
         // e.g. srcPort="1000-2000", dstPort="3000" -> dstPort="3000-4000"
-        long long sStart = Collection::parseLong(srcPort.substring(0, (size_t)srcDash));
-        long long sEnd   = Collection::parseLong(srcPort.substring((size_t)srcDash + 1));
+        long long sStart = Xi::parseLong(srcPort.substring(0, (size_t)srcDash));
+        long long sEnd   = Xi::parseLong(srcPort.substring((size_t)srcDash + 1));
         long long span   = sEnd - sStart;
-        long long dStart = Collection::parseLong(dstPort);
+        long long dStart = Xi::parseLong(dstPort);
         if (span > 0 && dStart > 0) {
             dstPort = intStr(dStart) + "-" + intStr(dStart + span);
         }
     } else if (dstDash >= 0 && srcDash < 0) {
         // e.g. dstPort="2000-2010", srcPort="1000" -> srcPort="1000-1010"
-        long long dStart = Collection::parseLong(dstPort.substring(0, (size_t)dstDash));
-        long long dEnd   = Collection::parseLong(dstPort.substring((size_t)dstDash + 1));
+        long long dStart = Xi::parseLong(dstPort.substring(0, (size_t)dstDash));
+        long long dEnd   = Xi::parseLong(dstPort.substring((size_t)dstDash + 1));
         long long span   = dEnd - dStart;
-        long long sStart = Collection::parseLong(srcPort);
+        long long sStart = Xi::parseLong(srcPort);
         if (span > 0 && sStart > 0) {
             srcPort = intStr(sStart) + "-" + intStr(sStart + span);
         }

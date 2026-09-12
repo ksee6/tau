@@ -32,15 +32,15 @@
 #pragma once
 
 #include "Manifest.hpp"
-#include <Collection/String.hpp>
-#include <Collection/Array.hpp>
-#include <Collection/Map.hpp>
-#include <Security/Crypto.hpp>
+#include <Xi/String.hpp>
+#include <Xi/Array.hpp>
+#include <Xi/Map.hpp>
+#include <Sec/Hash.hpp>
 
 namespace Tau {
 
-using namespace Collection;
 using namespace Xi;
+using namespace Sec;
 
 // ─── Store entry ──────────────────────────────────────────────────────────────
 struct StoreEntry {

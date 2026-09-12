@@ -6,13 +6,12 @@
 #pragma once
 
 #include "Config.hpp"
-#include <Collection/String.hpp>
-#include <Collection/Array.hpp>
+#include <Xi/String.hpp>
+#include <Xi/Array.hpp>
 #include <cstdint>
 
 namespace Tau {
 
-using namespace Collection;
 using namespace Xi;
 
 class Monitor {

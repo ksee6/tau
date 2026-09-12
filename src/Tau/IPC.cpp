@@ -227,7 +227,7 @@ void IPCServer::_dispatchCommand(Client *c, const String &cmd) {
     if (verb == "CAT" && parts.length() >= 2) {
         String spawnName = parts[1];
         if (_handlers.wake) _handlers.wake(spawnName);
-        int nlines = (parts.length() >= 3) ? (int)Collection::parseLong(parts[2]) : 100;
+        int nlines = (parts.length() >= 3) ? (int)Xi::parseLong(parts[2]) : 100;
         if (!_handlers.cat) { ::write(c->fd, ".\n", 2); return; }
         String out = _handlers.cat(spawnName, nlines);
         ::write(c->fd, out.c_str(), out.length());
@@ -238,7 +238,7 @@ void IPCServer::_dispatchCommand(Client *c, const String &cmd) {
     if (verb == "SIGNAL" && parts.length() >= 3) {
         String spawnName = parts[1];
         if (_handlers.wake) _handlers.wake(spawnName);
-        int sig = (int)Collection::parseLong(parts[2]);
+        int sig = (int)Xi::parseLong(parts[2]);
         bool ok = _handlers.signal ? _handlers.signal(spawnName, sig) : false;
         if (ok) ::write(c->fd, "OK\n", 3);
         else    ::write(c->fd, "ERR\n", 4);
@@ -255,8 +255,8 @@ void IPCServer::_dispatchCommand(Client *c, const String &cmd) {
 
     if (verb == "STOP" && parts.length() >= 4) {
         String spawnName = parts[1];
-        int sig       = (int)Collection::parseLong(parts[2]);
-        int timeoutMs = (int)Collection::parseLong(parts[3]);
+        int sig       = (int)Xi::parseLong(parts[2]);
+        int timeoutMs = (int)Xi::parseLong(parts[3]);
         bool ok = _handlers.stop ? _handlers.stop(spawnName, sig, timeoutMs) : false;
         if (ok) ::write(c->fd, "OK\n", 3);
         else    ::write(c->fd, "ERR\n", 4);
@@ -265,8 +265,8 @@ void IPCServer::_dispatchCommand(Client *c, const String &cmd) {
 
     if (verb == "RESIZE" && parts.length() >= 4) {
         String spawnName = parts[1];
-        int cols = (int)Collection::parseLong(parts[2]);
-        int rows = (int)Collection::parseLong(parts[3]);
+        int cols = (int)Xi::parseLong(parts[2]);
+        int rows = (int)Xi::parseLong(parts[3]);
         bool ok = _handlers.resize ? _handlers.resize(spawnName, cols, rows) : false;
         if (ok) ::write(c->fd, "OK\n", 3);
         else    ::write(c->fd, "ERR\n", 4);
@@ -604,7 +604,7 @@ void IPCClient::attach(const String &spawnName, bool attachStdin, const String &
 
     char io[4096];
     bool running = true;
-    bool is_detached = false;
+    [[maybe_unused]] bool is_detached = false;
 
     while (running) {
         if (g_clientWinch) {
