@@ -172,6 +172,65 @@ inline bool mkdirP(const String &path, mode_t mode = 0755) {
     return (::mkdir(path.c_str(), mode) == 0 || errno == EEXIST);
 }
 
+inline bool copyRecursive(const String &src, const String &dst) {
+    struct stat st;
+    if (::lstat(src.c_str(), &st) != 0) {
+        logError("tau: copy: source not found: ", src);
+        return false;
+    }
+
+    long long sl = rfind(dst, '/');
+    if (sl > 0) mkdirP(dst.substring(0, (size_t)sl));
+
+    if (S_ISLNK(st.st_mode)) {
+        char linkTarget[4096];
+        ssize_t len = ::readlink(src.c_str(), linkTarget, sizeof(linkTarget) - 1);
+        if (len > 0) {
+            linkTarget[len] = '\0';
+            ::unlink(dst.c_str());
+            return ::symlink(linkTarget, dst.c_str()) == 0;
+        }
+        return false;
+    }
+
+    if (S_ISREG(st.st_mode)) {
+        int inFd = ::open(src.c_str(), O_RDONLY);
+        if (inFd < 0) return false;
+        int outFd = ::open(dst.c_str(), O_WRONLY | O_CREAT | O_TRUNC, st.st_mode & 0777);
+        if (outFd < 0) { ::close(inFd); return false; }
+
+        char buf[65536];
+        ssize_t n;
+        while ((n = ::read(inFd, buf, sizeof(buf))) > 0) {
+            ssize_t written = 0;
+            while (written < n) {
+                ssize_t w = ::write(outFd, buf + written, (size_t)(n - written));
+                if (w <= 0) break;
+                written += w;
+            }
+        }
+        ::close(inFd);
+        ::close(outFd);
+        return true;
+    }
+
+    if (S_ISDIR(st.st_mode)) {
+        mkdirP(dst, st.st_mode & 0777);
+        DIR *dir = ::opendir(src.c_str());
+        if (!dir) return false;
+        struct dirent *ent;
+        bool ok = true;
+        while ((ent = ::readdir(dir)) != nullptr) {
+            if (ent->d_name[0] == '.' && (ent->d_name[1] == '\0' || (ent->d_name[1] == '.' && ent->d_name[2] == '\0')))
+                continue;
+            ok = copyRecursive(src + "/" + ent->d_name, dst + "/" + ent->d_name) && ok;
+        }
+        ::closedir(dir);
+        return ok;
+    }
+    return true;
+}
+
 // ─── YAML node helpers ────────────────────────────────────────────────────────
 
 using NodeBase = Xi::Node<void>;

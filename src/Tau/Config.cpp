@@ -5,6 +5,7 @@
 
 #include <Tau/Config.hpp>
 #include <Tau/Util.hpp>
+#include <Resource/File.hpp>
 
 #include <cstdlib>
 #include <cstring>
@@ -16,10 +17,14 @@
 namespace Tau {
 
 // ─── Static members ───────────────────────────────────────────────────────────
-String Config::_tauPath;
-String Config::_tauPathTemp;
-String Config::_tauGlobal;
-bool   Config::_initialised = false;
+static String s_tauGlobal;
+static String s_tau;
+static String s_tauRuntime;
+static String s_tauStore;
+static bool s_hasGlobal = false;
+static bool s_hasTau = false;
+static bool s_hasRuntime = false;
+static bool s_hasStore = false;
 
 // ─── expandHome ───────────────────────────────────────────────────────────────
 
@@ -38,85 +43,133 @@ String Config::expandHome(const String &path) {
     return expanded;
 }
 
+// ─── Lazy Path Getters ────────────────────────────────────────────────────────
+
+const String &getTauGlobalDir() {
+    if (s_hasGlobal) return s_tauGlobal;
+    const char *envGlobal = ::getenv(ENV_TAU_GLOBAL);
+    s_tauGlobal = Config::expandHome(envGlobal ? String(envGlobal) : String(DEFAULT_TAU_GLOBAL));
+    s_hasGlobal = true;
+    return s_tauGlobal;
+}
+
+const String &getTauDir() {
+    if (s_hasTau) return s_tau;
+    const char *env = ::getenv(ENV_TAU);
+    if (!env || !*env) env = ::getenv(ENV_TAU_PATH);
+    String path = env ? Config::expandHome(String(env)) : Config::expandHome(String(DEFAULT_TAU));
+    // If it evaluates starts with /root, its automatically removed
+    if (path.startsWith("/root/")) {
+        path = path.substring(5); // e.g. /root/.var/tau -> /.var/tau
+    } else if (path == "/root") {
+        path = "/";
+    }
+    s_tau = path;
+    s_hasTau = true;
+    return s_tau;
+}
+
+const String &getTauRuntimeDir() {
+    if (s_hasRuntime) return s_tauRuntime;
+    const char *env = ::getenv(ENV_TAU_RUNTIME);
+    if (!env || !*env) env = ::getenv(ENV_TAU_PATH_TEMP);
+    if (env && *env) {
+        s_tauRuntime = Config::expandHome(String(env));
+    } else {
+        String runTau = Config::expandHome(String(DEFAULT_TAU_RUNTIME));
+        String runDir = Config::expandHome("~/.run");
+        if (isDir(runTau) || isDir(runDir) || mkdirP(runTau)) {
+            s_tauRuntime = runTau;
+        } else {
+            uid_t uid = ::getuid();
+            if (uid == 0) {
+                s_tauRuntime = "/run/tau";
+            } else {
+                String userName;
+                struct passwd *pw = ::getpwuid(uid);
+                if (pw && pw->pw_name) userName = String(pw->pw_name);
+                const char *uEnv = ::getenv("USER");
+                if (userName.isEmpty() && uEnv) userName = String(uEnv);
+                if (userName.isEmpty()) userName = intStr((long long)uid);
+                s_tauRuntime = "/run/" + userName + "/tau";
+            }
+        }
+    }
+    s_hasRuntime = true;
+    return s_tauRuntime;
+}
+
+const String &getTauStoreDir() {
+    if (s_hasStore) return s_tauStore;
+    const char *env = ::getenv(ENV_TAU_STORE);
+    if (env && *env) {
+        s_tauStore = Config::expandHome(String(env));
+        s_hasStore = true;
+        return s_tauStore;
+    }
+
+    String globalDir = getTauGlobalDir();
+    String globalTau = globalDir + "/tau";
+    struct stat st;
+    bool isSuid = (::stat(globalTau.c_str(), &st) == 0 && (st.st_mode & S_ISUID) && (st.st_uid == 0));
+    bool inSudoers = false;
+    if (!isSuid && pathExists(globalTau)) {
+        if (pathExists("/etc/sudoers.d/tau")) {
+            Resource::LinuxFS fs;
+            String content = fs.read("/etc/sudoers.d/tau");
+            if (content.find("tau") >= 0) inSudoers = true;
+        }
+        if (!inSudoers) {
+            int ret = ::system("sudo -n -l 2>/dev/null | grep -E 'tau|ALL' >/dev/null 2>&1");
+            if (ret == 0) inSudoers = true;
+        }
+    }
+
+    if (isSuid || inSudoers) {
+        s_tauStore = globalDir;
+    } else {
+        s_tauStore = getTauDir();
+    }
+    s_hasStore = true;
+    return s_tauStore;
+}
+
 // ─── init ─────────────────────────────────────────────────────────────────────
 
 void Config::init() {
-    if (_initialised) return;
-
-    uid_t uid = ::getuid();
-    String userName;
-    struct passwd *pw = ::getpwuid(uid);
-    if (pw && pw->pw_name) userName = String(pw->pw_name);
-    const char *uEnv = ::getenv("USER");
-    if (userName.isEmpty() && uEnv) userName = String(uEnv);
-
-    // 1. TAU_GLOBAL (defaults to /.var/tau)
-    const char *envGlobal = ::getenv(ENV_TAU_GLOBAL);
-    _tauGlobal = expandHome(envGlobal ? String(envGlobal) : String(DEFAULT_TAU_GLOBAL));
-
-    // 2. TAU_PATH_TEMP
-    // defaults to /tmp/tau for root (uid == 0), and /tmp/tau-<uid> for non-root
-    const char *envTemp = ::getenv(ENV_TAU_PATH_TEMP);
-    if (envTemp && envTemp[0] != '\0') {
-        _tauPathTemp = expandHome(String(envTemp));
-    } else {
-        if (uid == 0) {
-            _tauPathTemp = "/tmp/tau";
-        } else {
-            _tauPathTemp = "/tmp/tau-" + intStr((long long)uid);
-        }
-    }
-
-    // 3. TAU_PATH
-    // defaults to ~/.var/tau for users, and TAU_GLOBAL for root
-    const char *envPath = ::getenv(ENV_TAU_PATH);
-    if (envPath && envPath[0] != '\0') {
-        _tauPath = expandHome(String(envPath));
-    } else {
-        if (uid == 0) {
-            _tauPath = _tauGlobal;
-        } else {
-            _tauPath = expandHome(String(DEFAULT_TAU_PATH));
-        }
-    }
-
-    _initialised = true;
+    getTauGlobalDir();
+    getTauDir();
+    getTauRuntimeDir();
+    getTauStoreDir();
 }
 
 // ─── Accessors ────────────────────────────────────────────────────────────────
 
-const String &Config::tauPath() {
-    if (!_initialised) init();
-    return _tauPath;
-}
+const String &Config::tauPath()        { return getTauDir(); }
+const String &Config::tauPathTemp()    { return getTauRuntimeDir(); }
+const String &Config::tauGlobal()      { return getTauGlobalDir(); }
+const String &Config::getTauGlobalDir(){ return Tau::getTauGlobalDir(); }
+const String &Config::getTauDir()      { return Tau::getTauDir(); }
+const String &Config::getTauRuntimeDir(){ return Tau::getTauRuntimeDir(); }
+const String &Config::getTauStoreDir() { return Tau::getTauStoreDir(); }
 
-const String &Config::tauPathTemp() {
-    if (!_initialised) init();
-    return _tauPathTemp;
-}
-
-const String &Config::tauGlobal() {
-    if (!_initialised) init();
-    return _tauGlobal;
-}
-
-String Config::storePath()       { return tauPath() + "/store"; }
-String Config::manifestsPath()   { return tauPath() + "/manifests"; }
+String Config::storePath()       { return getTauStoreDir() + "/store"; }
+String Config::manifestsPath()   { return getTauStoreDir() + "/manifests"; }
 String Config::listsPath(const String &listName) {
-    if (listName.isEmpty()) return tauPath() + "/lists";
-    return tauPath() + "/lists/" + listName;
+    if (listName.isEmpty()) return getTauDir() + "/lists";
+    return getTauDir() + "/lists/" + listName;
 }
 String Config::listTempPath(const String &listName) {
-    if (listName.isEmpty()) return tauPathTemp() + "/lists";
-    return tauPathTemp() + "/lists/" + listName;
+    if (listName.isEmpty()) return getTauRuntimeDir() + "/lists";
+    return getTauRuntimeDir() + "/lists/" + listName;
 }
-String Config::slotsPath() { return tauPath() + "/slots"; }
-String Config::slotsGlobalPath() { return tauGlobal() + "/slots"; }
-String Config::githubCachePath() { return tauPath() + "/githubCache"; }
-String Config::globalManifestPath() { return tauPath() + "/tau.yml"; }
+String Config::slotsPath() { return getTauDir() + "/slots"; }
+String Config::slotsGlobalPath() { return getTauGlobalDir() + "/slots"; }
+String Config::githubCachePath() { return getTauStoreDir() + "/githubCache"; }
+String Config::globalManifestPath() { return getTauStoreDir() + "/tau.yml"; }
 
-String Config::instancesPath()   { return tauPathTemp() + "/instances"; }
-String Config::monitorsPath()    { return tauPathTemp() + "/monitors"; }
+String Config::instancesPath()   { return getTauRuntimeDir() + "/instances"; }
+String Config::monitorsPath()    { return getTauRuntimeDir() + "/monitors"; }
 String Config::instanceDir(const String &name) {
     if (name.startsWith("/") || (name.find("/") >= 0 && pathExists(name))) {
         return name;
@@ -125,12 +178,11 @@ String Config::instanceDir(const String &name) {
 }
 
 String Config::targetManifestsDir() {
-    if (!_initialised) init();
-    String globalManifests     = tauGlobal() + "/manifests";
-    String sourceBuildTauBin   = tauGlobal() + "/source/build/tau";
-    String globalTauBin        = tauGlobal() + "/tau";
-    String sourceBuildStoreBin = tauGlobal() + "/source/build/tau-store";
-    String globalStoreBin      = tauGlobal() + "/tau-store";
+    String globalManifests     = getTauGlobalDir() + "/manifests";
+    String sourceBuildTauBin   = getTauGlobalDir() + "/source/build/tau";
+    String globalTauBin        = getTauGlobalDir() + "/tau";
+    String sourceBuildStoreBin = getTauGlobalDir() + "/source/build/tau-store";
+    String globalStoreBin      = getTauGlobalDir() + "/tau-store";
 
     bool storeExecutable = (pathExists(sourceBuildTauBin) && ::access(sourceBuildTauBin.c_str(), X_OK) == 0) ||
                            (pathExists(globalTauBin) && ::access(globalTauBin.c_str(), X_OK) == 0) ||
@@ -146,9 +198,7 @@ String Config::targetManifestsDir() {
 // ─── ensureLayout ─────────────────────────────────────────────────────────────
 
 void Config::ensureLayout() {
-    if (!_initialised) init();
-
-    mkdirP(tauPath());
+    mkdirP(getTauDir());
     mkdirP(storePath());
     mkdirP(githubCachePath());
 
@@ -156,7 +206,7 @@ void Config::ensureLayout() {
     if (!isDir(mPath)) ::mkdir(mPath.c_str(), 0777);
     ::chmod(mPath.c_str(), 0777);
 
-    mkdirP(tauPathTemp());
+    mkdirP(getTauRuntimeDir());
     mkdirP(instancesPath());
 
     String monPath = monitorsPath();

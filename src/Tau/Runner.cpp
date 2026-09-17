@@ -451,11 +451,17 @@ bool Runner::resizeSpawn(const String &name, int cols, int rows) {
 // ─── Timing ───────────────────────────────────────────────────────────────────
 
 bool Runner::execWait(const DWait &d) {
+    if (_opts.storeMode && _opts.isRootManifest) {
+        throw TauThrow("wait is not allowed in root manifests in store mode");
+    }
     if (d.seconds > 0) ::usleep((useconds_t)(d.seconds * 1000000.0));
     return true;
 }
 
 bool Runner::execWaitExit(const DWaitExit &d) {
+    if (_opts.storeMode && _opts.isRootManifest) {
+        throw TauThrow("waitexit is not allowed in root manifests in store mode");
+    }
     // Run the child block, tracking all spawns created inside
     size_t spawnsBefore = _spawns.length();
     run(d.children);
@@ -547,6 +553,10 @@ bool Runner::execDotenv(const DDotenv &d) {
 // ─── Spawn execution ──────────────────────────────────────────────────────────
 
 bool Runner::execSpawn(const DSpawn &d) {
+    if (_opts.storeMode && _opts.isRootManifest) {
+        throw TauThrow("spawn is not allowed in root manifests in store mode: " + d.command);
+    }
+
     String sname = d.name.isEmpty() ? allocSpawnName("") : d.name;
 
     // Check currently active spawns in memory
@@ -1873,14 +1883,29 @@ bool Runner::execDocker(const DDocker &d) {
     }
 
     DDocker resolvedD = d;
-    resolvedD.target = resolvePath(d.target);
-    if (!d.source.isEmpty()) resolvedD.source = resolvePath(d.source);
-    if (!d.work.isEmpty())   resolvedD.work   = resolvePath(d.work);
+    if (!d.target.isEmpty())   resolvedD.target   = resolvePath(d.target);
+    if (!d.download.isEmpty()) resolvedD.download = resolvePath(d.download);
+    if (!d.source.isEmpty())   resolvedD.source   = resolvePath(d.source);
+    if (!d.work.isEmpty())     resolvedD.work     = resolvePath(d.work);
+    if (!d.lower.isEmpty()) {
+        Array<String> lowers = d.lower.split(":");
+        String resolvedLower;
+        for (size_t i = 0; i < lowers.length(); ++i) {
+            String l = lowers[i].trim();
+            if (!l.isEmpty()) {
+                if (!resolvedLower.isEmpty()) resolvedLower += ":";
+                resolvedLower += resolvePath(l);
+            }
+        }
+        resolvedD.lower = resolvedLower;
+    }
 
-    // If already mounted on target, preserve existing mount
-    for (size_t i = 0; i < _mounts.length(); ++i) {
-        if (_mounts[i] == resolvedD.target) {
-            return true;
+    // If target is specified and already mounted on target, preserve existing mount
+    if (!resolvedD.target.isEmpty()) {
+        for (size_t i = 0; i < _mounts.length(); ++i) {
+            if (_mounts[i] == resolvedD.target) {
+                return true;
+            }
         }
     }
 
@@ -1888,11 +1913,13 @@ bool Runner::execDocker(const DDocker &d) {
     String globalStore = Config::storePath();
     bool ok = Docker::pullAndMount(resolvedD, globalStore, _opts.storeMode, outLayers);
     if (!ok) {
-        logError("tau: [docker] failed to pull and mount image: ", !d.image.isEmpty() ? d.image : d.source);
+        logError("tau: [docker] failed to process docker directive: ", !d.image.isEmpty() ? d.image : d.source);
         return false;
     }
 
-    _mounts.push(resolvedD.target);
+    if (!resolvedD.target.isEmpty()) {
+        _mounts.push(resolvedD.target);
+    }
     return true;
 }
 
@@ -1911,16 +1938,34 @@ bool Runner::execLocal(const DLocal &d) {
         // Copy source into store directory and symlink/copy to target
         String storeDir = Config::storePath() + "/local_" +
                           hexEncode(Sec::hash(src, 8));
-        fs.mkdir(storeDir);
+        struct stat srcSt;
+        if (::lstat(src.c_str(), &srcSt) == 0 && S_ISDIR(srcSt.st_mode)) {
+            mkdirP(storeDir);
+        } else {
+            long long sl = rfind(storeDir, '/');
+            if (sl > 0) mkdirP(storeDir.substring(0, (size_t)sl));
+        }
         ok = copyRecursive(src, storeDir);
-        if (ok && !d.target.isEmpty()) {
-            fs.mkdir(dst);
-            ok = copyRecursive(storeDir, dst);
+        if (ok && !dst.isEmpty()) {
+            long long lastSlash = rfind(dst, '/');
+            if (lastSlash > 0) mkdirP(dst.substring(0, (size_t)lastSlash));
+            struct stat st;
+            if (::lstat(dst.c_str(), &st) == 0) ::system(("rm -rf '" + dst + "'").c_str());
+
+            if (d.download) {
+                // In store mode with download=true: copy directly so user has read-write access
+                ok = copyRecursive(storeDir, dst);
+            } else {
+                // In store mode with download=false (default): symlink here
+                if (::symlink(storeDir.c_str(), dst.c_str()) != 0) {
+                    copyRecursive(storeDir, dst);
+                }
+                ok = true;
+            }
         }
     } else {
-        // Direct copy from source to target without store caching
-        if (!d.target.isEmpty() && src != dst) {
-            fs.mkdir(dst);
+        // Direct copy from source to target without store caching (run mode ignores download)
+        if (!dst.isEmpty() && src != dst) {
             ok = copyRecursive(src, dst);
         } else {
             ok = true;
@@ -1935,11 +1980,14 @@ bool Runner::execLocal(const DLocal &d) {
             ParsedManifest parsed = Manifest::load(depManifest, visited, err);
             if (err.ok) {
                 String oldManifestPath = _opts.manifestPath;
+                bool oldIsRoot = _opts.isRootManifest;
                 _opts.manifestPath = depManifest;
+                _opts.isRootManifest = false; // child dependencies are allowed spawns/waits in store mode!
                 _manifestDepth++;
                 run(parsed.directives);
                 _manifestDepth--;
                 _opts.manifestPath = oldManifestPath;
+                _opts.isRootManifest = oldIsRoot;
             }
         }
     }
@@ -1977,12 +2025,20 @@ bool Runner::execGit(const DGit &d) {
             if (lastSlash > 0) mkdirP(target.substring(0, (size_t)lastSlash));
             struct stat st;
             if (::lstat(target.c_str(), &st) == 0) ::system(("rm -rf '" + target + "'").c_str());
-            if (::symlink(storeDir.c_str(), target.c_str()) != 0) {
-                copyRecursive(storeDir, target);
+
+            if (d.download) {
+                // In store mode with download=true: clone/copy directly so user has read-write access
+                ok = copyRecursive(storeDir, target);
+            } else {
+                // In store mode with download=false (default): symlink here
+                if (::symlink(storeDir.c_str(), target.c_str()) != 0) {
+                    copyRecursive(storeDir, target);
+                }
+                ok = true;
             }
         }
     } else {
-        // Direct clone into target without store caching
+        // Direct clone into target without store caching (run mode ignores download)
         if (!target.isEmpty()) {
             long long lastSlash = rfind(target, '/');
             if (lastSlash > 0) mkdirP(target.substring(0, (size_t)lastSlash));
@@ -1992,7 +2048,6 @@ bool Runner::execGit(const DGit &d) {
         }
     }
 
-
     if (ok) {
         String depManifest = target + "/tau.yml";
         if (pathExists(depManifest)) {
@@ -2001,11 +2056,14 @@ bool Runner::execGit(const DGit &d) {
             ParsedManifest parsed = Manifest::load(depManifest, visited, err);
             if (err.ok) {
                 String oldManifestPath = _opts.manifestPath;
+                bool oldIsRoot = _opts.isRootManifest;
                 _opts.manifestPath = depManifest;
+                _opts.isRootManifest = false; // child dependencies are allowed spawns/waits in store mode!
                 _manifestDepth++;
                 run(parsed.directives);
                 _manifestDepth--;
                 _opts.manifestPath = oldManifestPath;
+                _opts.isRootManifest = oldIsRoot;
             }
         }
     }
@@ -2789,62 +2847,7 @@ void Runner::notifySpawnChange(const ActiveSpawn &sp) {
 }
 
 bool Runner::copyRecursive(const String &src, const String &dst) {
-    struct stat st;
-    if (::lstat(src.c_str(), &st) != 0) {
-        logError("tau: copy: source not found: ", src);
-        return false;
-    }
-
-    long long sl = rfind(dst, '/');
-    if (sl > 0) mkdirP(dst.substring(0, (size_t)sl));
-
-    if (S_ISLNK(st.st_mode)) {
-        char linkTarget[4096];
-        ssize_t len = ::readlink(src.c_str(), linkTarget, sizeof(linkTarget) - 1);
-        if (len > 0) {
-            linkTarget[len] = '\0';
-            ::unlink(dst.c_str());
-            return ::symlink(linkTarget, dst.c_str()) == 0;
-        }
-        return false;
-    }
-
-    if (S_ISREG(st.st_mode)) {
-        int inFd = ::open(src.c_str(), O_RDONLY);
-        if (inFd < 0) return false;
-        int outFd = ::open(dst.c_str(), O_WRONLY | O_CREAT | O_TRUNC, st.st_mode & 0777);
-        if (outFd < 0) { ::close(inFd); return false; }
-
-        char buf[65536];
-        ssize_t n;
-        while ((n = ::read(inFd, buf, sizeof(buf))) > 0) {
-            ssize_t written = 0;
-            while (written < n) {
-                ssize_t w = ::write(outFd, buf + written, (size_t)(n - written));
-                if (w <= 0) break;
-                written += w;
-            }
-        }
-        ::close(inFd);
-        ::close(outFd);
-        return true;
-    }
-
-    if (S_ISDIR(st.st_mode)) {
-        mkdirP(dst, st.st_mode & 0777);
-        DIR *dir = ::opendir(src.c_str());
-        if (!dir) return false;
-        struct dirent *ent;
-        bool ok = true;
-        while ((ent = ::readdir(dir)) != nullptr) {
-            if (ent->d_name[0] == '.' && (ent->d_name[1] == '\0' || (ent->d_name[1] == '.' && ent->d_name[2] == '\0')))
-                continue;
-            ok = copyRecursive(src + "/" + ent->d_name, dst + "/" + ent->d_name) && ok;
-        }
-        ::closedir(dir);
-        return ok;
-    }
-    return true;
+    return Tau::copyRecursive(src, dst);
 }
 
 

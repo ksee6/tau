@@ -42,31 +42,65 @@ String Store::injectCommits(const String &yaml, const String & /*manifestDir*/) 
     Array<String> lines = yaml.split("\n");
     String result;
     bool inGitBlock = false;
+    String currentUrl;
+    String currentBranch;
+
+    auto flushGit = [&]() {
+        if (!currentUrl.isEmpty()) {
+            GHRepo repo;
+            if (!GHRepo::parse(currentUrl, repo)) {
+                repo.owner = "";
+                repo.repo  = currentUrl;
+                repo.ref   = currentBranch;
+            } else {
+                if (!currentBranch.isEmpty()) repo.ref = currentBranch;
+            }
+            String commit = GitHub::resolveCommit(repo);
+            if (!commit.isEmpty())
+                result += "# __commit: " + commit + "\n";
+            currentUrl = "";
+            currentBranch = "";
+        }
+    };
 
     for (size_t i = 0; i < lines.length(); ++i) {
         String line = lines[i];
+        String trimmed = line.trim();
 
-        if (line.find("- git:") >= 0 || line.find("-git:") >= 0)
+        if (trimmed.startsWith("- git:") || trimmed.startsWith("-git:") ||
+            trimmed.startsWith("- github:") || trimmed.startsWith("-github:")) {
+            flushGit();
             inGitBlock = true;
-
-        if (inGitBlock && line.find("source:") >= 0) {
-            long long colon = line.find("source:");
-            String url = line.substring((size_t)colon + 7).trim();
-            if ((url.startsWith("'") && url.endsWith("'")) ||
-                (url.startsWith("\"") && url.endsWith("\"")))
-                url = url.substring(1, url.length() - 1);
-
-            GHRepo repo;
-            if (GHRepo::parse(url, repo)) {
-                String commit = GitHub::resolveCommit(repo);
-                if (!commit.isEmpty())
-                    result += "# __commit: " + commit + "\n";
+            long long colon = trimmed.find(":");
+            if (colon >= 0) {
+                String val = trimmed.substring((size_t)colon + 1).trim();
+                if ((val.startsWith("'") && val.endsWith("'")) ||
+                    (val.startsWith("\"") && val.endsWith("\"")))
+                    val = val.substring(1, val.length() - 1);
+                if (!val.isEmpty()) currentUrl = val;
             }
-            inGitBlock = false;
+        } else if (inGitBlock) {
+            if (trimmed.startsWith("- ")) {
+                flushGit();
+                inGitBlock = false;
+            } else if (trimmed.startsWith("source:")) {
+                String url = trimmed.substring(7).trim();
+                if ((url.startsWith("'") && url.endsWith("'")) ||
+                    (url.startsWith("\"") && url.endsWith("\"")))
+                    url = url.substring(1, url.length() - 1);
+                currentUrl = url;
+            } else if (trimmed.startsWith("branch:")) {
+                String br = trimmed.substring(7).trim();
+                if ((br.startsWith("'") && br.endsWith("'")) ||
+                    (br.startsWith("\"") && br.endsWith("\"")))
+                    br = br.substring(1, br.length() - 1);
+                currentBranch = br;
+            }
         }
 
         result += line + "\n";
     }
+    flushGit();
     return result;
 }
 
@@ -76,54 +110,187 @@ String Store::injectTimestamps(const String &yaml, const String &manifestDir) {
     Array<String> lines = yaml.split("\n");
     String result;
     bool inLocalBlock = false;
+    String currentPath;
 
-    for (size_t i = 0; i < lines.length(); ++i) {
-        String line = lines[i];
-
-        if (line.find("- local:") >= 0 || line.find("-local:") >= 0)
-            inLocalBlock = true;
-
-        if (inLocalBlock && line.find("source:") >= 0) {
-            long long colon = line.find("source:");
-            String path = line.substring((size_t)colon + 7).trim();
-            if (!path.startsWith("/")) path = manifestDir + "/" + path;
-
+    auto flushLocal = [&]() {
+        if (!currentPath.isEmpty()) {
+            String p = currentPath;
+            if (!p.startsWith("/")) p = manifestDir + "/" + p;
             struct stat st;
-            if (::stat(path.c_str(), &st) == 0) {
+            if (::stat(p.c_str(), &st) == 0) {
                 long long mtime = (long long)st.st_mtim.tv_sec * 1000000000LL +
                                   st.st_mtim.tv_nsec;
                 result += "# __mtime: " + intStr(mtime) + "\n";
+                if (S_ISDIR(st.st_mode)) {
+                    String subM = p + "/tau.yml";
+                    if (::stat(subM.c_str(), &st) == 0) {
+                        long long mtime2 = (long long)st.st_mtim.tv_sec * 1000000000LL + st.st_mtim.tv_nsec;
+                        result += "# __mtime_manifest: " + intStr(mtime2) + "\n";
+                    }
+                }
             }
-            inLocalBlock = false;
+            currentPath = "";
+        }
+    };
+
+    for (size_t i = 0; i < lines.length(); ++i) {
+        String line = lines[i];
+        String trimmed = line.trim();
+
+        if (trimmed.startsWith("- local:") || trimmed.startsWith("-local:")) {
+            flushLocal();
+            inLocalBlock = true;
+            long long colon = trimmed.find(":");
+            if (colon >= 0) {
+                String val = trimmed.substring((size_t)colon + 1).trim();
+                if ((val.startsWith("'") && val.endsWith("'")) ||
+                    (val.startsWith("\"") && val.endsWith("\"")))
+                    val = val.substring(1, val.length() - 1);
+                if (!val.isEmpty()) currentPath = val;
+            }
+        } else if (inLocalBlock) {
+            if (trimmed.startsWith("- ")) {
+                flushLocal();
+                inLocalBlock = false;
+            } else if (trimmed.startsWith("source:")) {
+                String p = trimmed.substring(7).trim();
+                if ((p.startsWith("'") && p.endsWith("'")) ||
+                    (p.startsWith("\"") && p.endsWith("\"")))
+                    p = p.substring(1, p.length() - 1);
+                currentPath = p;
+            }
         }
 
         result += line + "\n";
+    }
+    flushLocal();
+    return result;
+}
+
+// ─── injectSubdeps ────────────────────────────────────────────────────────────
+
+static void collectChildManifests(const DirectiveList &directives,
+                                  const String &manifestDir,
+                                  Array<String> &childManifests) {
+    for (size_t i = 0; i < directives.length(); ++i) {
+        Directive *d = directives[i];
+        if (!d) continue;
+        if (d->kind == DirectiveKind::Local) {
+            auto *ld = static_cast<DLocal *>(d);
+            String src = ld->source;
+            if (!src.startsWith("/")) src = manifestDir + "/" + src;
+            String cand1 = src + "/tau.yml";
+            String cand2 = src + "/tau.yaml";
+            if (pathExists(cand1)) childManifests.push(cand1);
+            else if (pathExists(cand2)) childManifests.push(cand2);
+            else if (src.endsWith(".yml") || src.endsWith(".yaml")) {
+                if (pathExists(src)) childManifests.push(src);
+            }
+        } else if (d->kind == DirectiveKind::Git) {
+            auto *gd = static_cast<DGit *>(d);
+            GHRepo repo;
+            if (!GHRepo::parse(gd->source, repo)) {
+                repo.owner = "";
+                repo.repo  = gd->source;
+                repo.ref   = gd->branch;
+            } else {
+                repo.ref   = gd->branch;
+            }
+            String commit = GitHub::resolveCommit(repo);
+            String gitUrl = gd->source;
+            if (!gitUrl.startsWith("http://") && !gitUrl.startsWith("https://") && !gitUrl.startsWith("git@")) {
+                gitUrl = String("https://github.com/") + repo.owner + "/" + repo.repo + ".git";
+            }
+            String storeDir = Config::storePath() + "/git_" + hexEncode(Sec::hash(gitUrl + ":" + commit, 8));
+            String cand1 = storeDir + "/tau.yml";
+            String cand2 = storeDir + "/tau.yaml";
+            if (pathExists(cand1)) childManifests.push(cand1);
+            else if (pathExists(cand2)) childManifests.push(cand2);
+        } else if (d->kind == DirectiveKind::And || d->kind == DirectiveKind::Or ||
+                   d->kind == DirectiveKind::Nand || d->kind == DirectiveKind::Nor ||
+                   d->kind == DirectiveKind::Xor) {
+            auto *lb = static_cast<DLogicBlock *>(d);
+            collectChildManifests(lb->children, manifestDir, childManifests);
+        } else if (d->kind == DirectiveKind::WaitExit) {
+            auto *we = static_cast<DWaitExit *>(d);
+            collectChildManifests(we->children, manifestDir, childManifests);
+        }
+    }
+}
+
+String Store::injectSubdeps(const String &yaml, const String &manifestDir) {
+    Array<String> parseVisited;
+    ParseError parseErr;
+    ParsedManifest parsed = Manifest::parse(yaml, manifestDir, parseVisited, parseErr);
+    if (!parseErr.ok) return yaml;
+
+    Array<String> childManifests;
+    collectChildManifests(parsed.directives, manifestDir, childManifests);
+
+    String result = yaml;
+    for (size_t i = 0; i < childManifests.length(); ++i) {
+        String child = childManifests[i];
+        String childHash = computeHash(child);
+        if (!childHash.isEmpty()) {
+            result += "\n# __subdep: " + child + " " + childHash + "\n";
+        }
     }
     return result;
 }
 
 // ─── computeHash ──────────────────────────────────────────────────────────────
 
-String Store::computeHash(const String &manifestPath) {
-    Resource::LinuxFS fs;
-    String content = fs.read(manifestPath);
-    if (content.isEmpty()) return "";
+static Array<String> s_hashingStack;
 
-    String basePath = manifestPath;
+String Store::computeHash(const String &manifestPath) {
+    char realBuf[4096] = {};
+    String canonPath = manifestPath;
+    if (::realpath(manifestPath.c_str(), realBuf)) {
+        canonPath = String(realBuf);
+    }
+    for (size_t i = 0; i < s_hashingStack.length(); ++i) {
+        if (s_hashingStack[i] == canonPath) return ""; // cycle break
+    }
+    s_hashingStack.push(canonPath);
+
+    Resource::LinuxFS fs;
+    String content = fs.read(canonPath);
+    if (content.isEmpty()) {
+        s_hashingStack.pop();
+        return "";
+    }
+
+    String basePath = canonPath;
     long long sl = rfind(basePath, '/');
     if (sl >= 0) basePath = basePath.substring(0, (size_t)sl);
 
     content = injectCommits(content, basePath);
     content = injectTimestamps(content, basePath);
-    return hashContent(content);
+    content = injectSubdeps(content, basePath);
+    String h = hashContent(content);
+
+    s_hashingStack.pop();
+    return h;
 }
 
 // ─── isRan / markRan ─────────────────────────────────────────────────────────
 
 bool Store::isRan(const String &hash) {
-    String sentinel = Config::storePath() + "/" + hash + "/ran";
-    Resource::LinuxFS fs;
-    return fs.read(sentinel).trim() == "1";
+    String p = Config::storePath() + "/" + hash;
+    struct stat st;
+    if (::lstat(p.c_str(), &st) == 0) {
+        if (S_ISLNK(st.st_mode)) {
+            // For root manifests, existence of symlink in store/ pointing to an existing file means ran
+            if (::stat(p.c_str(), &st) == 0) {
+                return true;
+            }
+        } else if (S_ISDIR(st.st_mode)) {
+            String sentinel = p + "/ran";
+            Resource::LinuxFS fs;
+            return fs.read(sentinel).trim() == "1";
+        }
+    }
+    return false;
 }
 
 void Store::markRan(const String &hash) {
@@ -171,17 +338,34 @@ bool Store::runManifest(const StoreEntry &entry) {
     }
     storeLogInfo(entry.manifestPath, "directives count=" + intStr(parsed.directives.length()));
     RunnerOptions hostOpts;
-    hostOpts.instanceName = entry.hash;
-    hostOpts.manifestPath = entry.manifestPath;
-    hostOpts.storeMode    = true;
-    hostOpts.attachStdin  = false;
+    hostOpts.instanceName   = entry.hash;
+    hostOpts.manifestPath   = entry.manifestPath;
+    hostOpts.storeMode      = true;
+    hostOpts.attachStdin    = false;
+    hostOpts.isRootManifest = entry.isRoot;
 
     Runner hostRunner(hostOpts);
     try {
-        hostRunner.run(parsed.directives);
+        if (!hostRunner.run(parsed.directives)) {
+            storeLogError(entry.manifestPath, "directive execution failed");
+            return false;
+        }
     } catch (const TauThrow &t) {
         storeLogError(entry.manifestPath, String("throw: ") + t.message);
         return false;
+    }
+
+    if (entry.isRoot) {
+        // Root manifest: the user owns it and the directory it is in.
+        // Keep its digest as a symlink: TAU_STORE/store/<hash> -> <manifest>
+        String storeSymlink = Config::storePath() + "/" + entry.hash;
+        struct stat st;
+        if (::lstat(storeSymlink.c_str(), &st) == 0) {
+            ::system(("rm -rf '" + storeSymlink + "'").c_str());
+        }
+        ::symlink(entry.manifestPath.c_str(), storeSymlink.c_str());
+        storeLogCompleted(entry.manifestPath);
+        return true;
     }
 
     // Run isolated sandbox execution
@@ -366,13 +550,19 @@ int Store::run() {
             collectDirectivesHashes(parsed.directives, dir, activeHashes);
         }
 
-        bool previouslyRan = (symlinkHash == currentHash) && isRan(currentHash);
+        bool previouslyRan = false;
+        if (isLink) {
+            previouslyRan = (symlinkHash == currentHash) && isRan(currentHash);
+        } else {
+            previouslyRan = isRan(currentHash);
+        }
 
         StoreEntry entry;
         entry.hash         = currentHash;
         entry.manifestPath = realManifestPath;
         entry.storeDir     = Config::storePath() + "/" + currentHash;
         entry.ran          = previouslyRan;
+        entry.isRoot       = true;
         entries.push(entry);
     }
     ::closedir(d);
@@ -399,6 +589,7 @@ int Store::run() {
             e.manifestPath = global;
             e.storeDir     = Config::storePath() + "/" + hash;
             e.ran          = isRan(hash);
+            e.isRoot       = true;
             entries.push(e);
         }
     }
@@ -406,7 +597,9 @@ int Store::run() {
     bool anyFailed = false;
     for (size_t i = 0; i < entries.length(); ++i) {
         if (!entries[i].ran) {
-            mkdirP(entries[i].storeDir);
+            if (!entries[i].isRoot) {
+                mkdirP(entries[i].storeDir);
+            }
             if (!runManifest(entries[i])) anyFailed = true;
         } else {
             storeLogCompleted(entries[i].manifestPath);

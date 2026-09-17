@@ -506,6 +506,8 @@ struct DImage : Directive {
  */
 struct DDocker : Directive {
     String image;
+    String download;
+    String lower;
     String target;
     String source;
     String work;
@@ -551,24 +553,28 @@ struct DLocal : Directive {
     String source;
     String target;
     bool   store = true;
+    bool   download = false;
     DLocal() : Directive(DirectiveKind::Local) {}
 };
 
 
 /**
- * `- git:`
+ * `- git:` / `- github:`
  * `    source: https://github.com/user/repo.git`
  * `    branch: main`       # or ">v1.0.0" or "reg abc.*"
  * `    target: ./deps/...`
+ * `    download: false`
  * `    store: true`
  */
 struct DGit : Directive {
     String source;
-    String branch;    ///< raw branch spec (may include operator prefix)
+    String branch = "main";    ///< raw branch spec (may include operator prefix)
     String target;
     bool   store = true;
+    bool   download = false;
     DGit() : Directive(DirectiveKind::Git) {}
 };
+using DGithub = DGit;
 
 /**
  * `- ghrelease:`

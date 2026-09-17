@@ -54,6 +54,7 @@ using namespace Xi;
 // ─── Exception for throw: directive ──────────────────────────────────────────
 struct TauThrow {
     String message;
+    explicit TauThrow(String msg = "") : message(Xi::Move(msg)) {}
 };
 
 // ─── Spawn tracking (used inside Runner) ──────────────────────────────────────
@@ -102,7 +103,8 @@ struct RunnerOptions {
     String manifestPath;       ///< Current manifest path
     String sourceManifestPath; ///< Original source manifest path before copying
 
-    bool storeMode  = false;   ///< true when running inside tau-store
+    bool storeMode      = false;   ///< true when running inside tau-store
+    bool isRootManifest = false;   ///< true when running root manifest in store mode (spawns/waits disallowed)
 
     String enterSlot;          ///< Optional eslot name to enter (--enter <eslot-name>)
 

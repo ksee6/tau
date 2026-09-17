@@ -247,11 +247,19 @@ echo "[TEST 10] Hot-Reloading of Manifest Files"
 $TAU_BIN stop hot_inst --kill 2>/dev/null || true
 sleep 0.5
 
-INSTANCES_DIR="/tmp/tau-$(id -u)/instances"
+INSTANCES_DIR="$HOME/.run/tau/instances"
+if [ ! -d "$INSTANCES_DIR" ]; then
+    INSTANCES_DIR="/run/$(whoami)/tau/instances"
+fi
 if [ ! -d "$INSTANCES_DIR" ]; then
     INSTANCES_DIR="/run/user/$(id -u)/tau/instances"
 fi
-if [ -n "$TAU_PATH_TEMP" ]; then
+if [ ! -d "$INSTANCES_DIR" ]; then
+    INSTANCES_DIR="/tmp/tau-$(id -u)/instances"
+fi
+if [ -n "$TAU_RUNTIME" ]; then
+    INSTANCES_DIR="$TAU_RUNTIME/instances"
+elif [ -n "$TAU_PATH_TEMP" ]; then
     INSTANCES_DIR="$TAU_PATH_TEMP/instances"
 fi
 

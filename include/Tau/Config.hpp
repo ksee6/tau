@@ -11,12 +11,18 @@ using namespace Xi;
 static constexpr const char *TAU_VERSION = "0.1.0";
 
 // ─── Environment variable names ───────────────────────────────────────────────
+// ─── Environment variable names ───────────────────────────────────────────────
+static constexpr const char *ENV_TAU           = "TAU";
+static constexpr const char *ENV_TAU_GLOBAL    = "TAU_GLOBAL";
+static constexpr const char *ENV_TAU_RUNTIME   = "TAU_RUNTIME";
+static constexpr const char *ENV_TAU_STORE     = "TAU_STORE";
 static constexpr const char *ENV_TAU_PATH      = "TAU_PATH";
 static constexpr const char *ENV_TAU_PATH_TEMP = "TAU_PATH_TEMP";
-static constexpr const char *ENV_TAU_GLOBAL    = "TAU_GLOBAL";
 
 // ─── Default paths ────────────────────────────────────────────────────────────
-static constexpr const char *DEFAULT_TAU_GLOBAL = "/.var/tau";
+static constexpr const char *DEFAULT_TAU_GLOBAL  = "/.var/tau";
+static constexpr const char *DEFAULT_TAU         = "~/.var/tau";
+static constexpr const char *DEFAULT_TAU_RUNTIME = "~/.run/tau";
 static constexpr const char *DEFAULT_TAU_PATH   = "~/.var/tau";
 
 // ─── Ring-buffer size for spawn scrollback ────────────────────────────────────
@@ -28,6 +34,12 @@ static constexpr int GITHUB_CACHE_MAX_SECS = 30 * 60;  // 30 minutes
 
 // ─── Default stop timeout ─────────────────────────────────────────────────────
 static constexpr int DEFAULT_STOP_TIMEOUT_SECS = 20;
+
+// ─── Lazy Path Getters (cached per run) ────────────────────────────────────────
+const String &getTauGlobalDir();
+const String &getTauDir();
+const String &getTauRuntimeDir();
+const String &getTauStoreDir();
 
 // ─── Config singleton ─────────────────────────────────────────────────────────
 
@@ -48,16 +60,28 @@ public:
     /** @brief Primary tau root (~/.var/tau for user, TAU_GLOBAL for root). */
     static const String &tauPath();
 
-    /** @brief Temporary tau root (/tmp/tau-<uid> for user, /tmp/tau for root). */
+    /** @brief Temporary tau root (~/.run/tau, or /run/<user>/tau). */
     static const String &tauPathTemp();
 
     /** @brief Global tau root (/.var/tau). */
     static const String &tauGlobal();
 
-    /** @brief The store subdirectory (under TAU_PATH). */
+    /** @brief Global directory (TAU_GLOBAL, defaults to /.var/tau). */
+    static const String &getTauGlobalDir();
+
+    /** @brief User directory (TAU, defaults to ~/.var/tau with /root stripped). */
+    static const String &getTauDir();
+
+    /** @brief Runtime directory (TAU_RUNTIME, defaults to ~/.run/tau or /run/<user>/tau). */
+    static const String &getTauRuntimeDir();
+
+    /** @brief Store root directory (TAU_STORE, checks TAU_GLOBAL/tau SUID/sudoers -> TAU_GLOBAL, else TAU). */
+    static const String &getTauStoreDir();
+
+    /** @brief The store subdirectory (under TAU_STORE). */
     static String storePath();
 
-    /** @brief The manifests subdirectory (under TAU_PATH). */
+    /** @brief The manifests subdirectory (under TAU_STORE). */
     static String manifestsPath();
 
     /** @brief The lists subdirectory (under TAU_PATH/lists). */
@@ -97,12 +121,6 @@ public:
      * @brief Ensure required directory structure exists.
      */
     static void ensureLayout();
-
-private:
-    static String _tauPath;
-    static String _tauPathTemp;
-    static String _tauGlobal;
-    static bool   _initialised;
 
     static String expandHome(const String &path);
 };

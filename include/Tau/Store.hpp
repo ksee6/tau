@@ -47,7 +47,8 @@ struct StoreEntry {
     String hash;           ///< Hex-encoded BLAKE2b-32 hash
     String storeDir;       ///< Absolute path: TAU_PATH/store/<hash>/
     String manifestPath;   ///< Original manifest path
-    bool   ran = false;    ///< Whether the store run succeeded
+    bool   ran    = false; ///< Whether the store run succeeded
+    bool   isRoot = false; ///< Whether this is a user root manifest
 };
 
 // ─── Store ────────────────────────────────────────────────────────────────────
@@ -133,6 +134,12 @@ private:
      */
     static String injectTimestamps(const String &yaml,
                                    const String &manifestDir);
+
+    /**
+     * @brief Inject sub-dependency manifests hashes into a manifest YAML string.
+     */
+    static String injectSubdeps(const String &yaml,
+                                const String &manifestDir);
 
     static String hashContent(const String &content);
 };

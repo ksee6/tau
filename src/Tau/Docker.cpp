@@ -240,10 +240,20 @@ bool Docker::downloadAndExtractLayer(const String &registry,
 
 bool Docker::pullAndMount(const DDocker &d,
                           const String &globalStorePath,
-                          bool /*isStoreMode*/,
+                          bool isStoreMode,
                           Array<String> &outLayers) {
     String imageName = !d.image.isEmpty() ? d.image : d.source;
-    if (imageName.isEmpty() || d.target.isEmpty()) return false;
+    if (imageName.isEmpty()) return false;
+
+    if (d.target.isEmpty() && !isStoreMode && d.download.isEmpty()) {
+        logError("tau: [docker] run mode requires target (for mounting) or download (for downloading layers)");
+        return false;
+    }
+
+    if (!isStoreMode && !d.download.isEmpty() && !d.download.startsWith("/") && d.download.find("..") >= 0) {
+        logError("tau: [docker] path escape not allowed in download: ", d.download);
+        return false;
+    }
 
     String registry, repository, tag;
     if (!parseImage(imageName, registry, repository, tag)) {
@@ -308,11 +318,35 @@ bool Docker::pullAndMount(const DDocker &d,
         outLayers.push(chosenDir);
     }
 
+    // If download is specified, copy/extract layers to download directory
+    if (!d.download.isEmpty()) {
+        mkdirP(d.download);
+        for (size_t i = 0; i < layerPaths.length(); ++i) {
+            copyRecursive(layerPaths[i], d.download);
+        }
+        // In store mode, ensure user can read-write it
+        if (isStoreMode) {
+            (void)::system(("chmod -R u+rw '" + d.download + "' 2>/dev/null").c_str());
+        }
+    }
+
+    // If target is empty, this directive is layer downloader only
+    if (d.target.isEmpty()) {
+        logInfo("tau: [docker] downloaded ", intStr(layerPaths.length()), " layers for ", imageName, " to ", (!d.download.isEmpty() ? d.download : "store"));
+        return true;
+    }
+
     // Build multi-lowerdirs string in reverse order (top to bottom)
     String lowerdirs;
     for (long long i = (long long)layerPaths.length() - 1; i >= 0; --i) {
         if (!lowerdirs.isEmpty()) lowerdirs += ":";
         lowerdirs += layerPaths[(size_t)i];
+    }
+
+    // Append any extra lowers behind the docker layers
+    if (!d.lower.isEmpty()) {
+        if (!lowerdirs.isEmpty()) lowerdirs += ":";
+        lowerdirs += d.lower;
     }
 
     mkdirP(d.target);

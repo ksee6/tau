@@ -200,16 +200,36 @@ Directive *Manifest::nodeToDirective(NodeBase *node,
         return nullptr;
     }
 
+    auto getProp = [&](const String &propKey, const String &def = "") -> String {
+        String v = childString(node, propKey, "");
+        if (v.isEmpty() && origNode && origNode != node) {
+            v = childString(origNode, propKey, "");
+        }
+        return v.isEmpty() ? def : v;
+    };
 
+    auto getPropBool = [&](const String &propKey, bool def) -> bool {
+        String v = getProp(propKey, "");
+        if (v.isEmpty()) return def;
+        if (v == "true" || v == "1" || v == "yes" || v == "on") return true;
+        if (v == "false" || v == "0" || v == "no" || v == "off") return false;
+        return def;
+    };
 
-
+    auto getPropNode = [&](const String &propKey) -> NodeBase* {
+        NodeBase *n = getDictNode(node, propKey);
+        if (!n && origNode && origNode != node) {
+            n = getDictNode(origNode, propKey);
+        }
+        return n;
+    };
 
     // ── wait ──────────────────────────────────────────────────────────────────
     if (key == "wait") {
         auto *d = new DWait();
-        d->isGlobal = childBool(node, "global", false);
-        if (node->size() > 0 && getDictNode(node, "targets") != nullptr) {
-            NodeBase *tn = getDictNode(node, "targets");
+        d->isGlobal = getPropBool("global", false);
+        NodeBase *tn = getPropNode("targets");
+        if (tn) {
             for (size_t i = 0; i < tn->size(); ++i) {
                 String s = nodeStr((*tn)[i]).trim();
                 if (!s.isEmpty()) d->targets.push(s);
@@ -263,14 +283,14 @@ Directive *Manifest::nodeToDirective(NodeBase *node,
     if (key == "trigger") {
         auto *d = new DTrigger();
         d->name = nodeStr(node).trim();
-        if (d->name.isEmpty()) d->name = childString(node, "name").trim();
+        if (d->name.isEmpty()) d->name = getProp("name").trim();
         return d;
     }
 
     // ── nowait ────────────────────────────────────────────────────────────────
     if (key == "nowait") {
         auto *d = new DNoWait();
-        NodeBase *target = getDictNode(node, "entry");
+        NodeBase *target = getPropNode("entry");
         if (!target) target = node;
         d->children = nodeListToDirectives(target, basePath, visited, err);
         return d;
@@ -279,7 +299,7 @@ Directive *Manifest::nodeToDirective(NodeBase *node,
     // ── waitall ───────────────────────────────────────────────────────────────
     if (key == "waitall") {
         auto *d = new DWaitAll();
-        NodeBase *target = getDictNode(node, "entry");
+        NodeBase *target = getPropNode("entry");
         if (!target) target = node;
         d->children = nodeListToDirectives(target, basePath, visited, err);
         return d;
@@ -287,11 +307,9 @@ Directive *Manifest::nodeToDirective(NodeBase *node,
 
     // ── logic blocks ──────────────────────────────────────────────────────────
     auto parseBlock = [&](DLogicBlock *block) -> Directive * {
-        NodeBase *target = getDictNode(node, "entry");
+        NodeBase *target = getPropNode("entry");
         if (!target) target = node;
-        logInfo("tau/parseBlock: key=", key, " nodeName='", node->getName(), "' nodeSize=", intStr(node->size()), " targetName='", target->getName(), "' targetSize=", intStr(target->size()));
         block->children = nodeListToDirectives(target, basePath, visited, err);
-        logInfo("tau/parseBlock: parsed children count=", intStr(block->children.length()));
         return block;
     };
 
@@ -299,7 +317,7 @@ Directive *Manifest::nodeToDirective(NodeBase *node,
     // ── waitexit ──────────────────────────────────────────────────────────────
     if (key == "waitexit") {
         auto *d = new DWaitExit();
-        NodeBase *target = getDictNode(node, "entry");
+        NodeBase *target = getPropNode("entry");
         if (!target) target = node;
         d->children = nodeListToDirectives(target, basePath, visited, err);
         return d;
@@ -308,29 +326,23 @@ Directive *Manifest::nodeToDirective(NodeBase *node,
     // ── retry ─────────────────────────────────────────────────────────────────
     if (key == "retry") {
         auto *d = new DRetry();
-        if (node->size() > 0 && getDictNode(node, "children") != nullptr) {
-            d->times = (int)parseLong(childString(node, "times", "0"));
-            String bStr = childString(node, "backoff", "1s");
-            d->backoff = parseDuration(bStr);
-            if (d->backoff <= 0) d->backoff = 1.0;
-            NodeBase *chNode = getDictNode(node, "children");
-            d->children = nodeListToDirectives(chNode, basePath, visited, err);
-        } else if (node->size() > 0 && (getDictNode(node, "times") != nullptr || getDictNode(node, "backoff") != nullptr)) {
-            d->times = (int)parseLong(childString(node, "times", "0"));
-            String bStr = childString(node, "backoff", "1s");
-            d->backoff = parseDuration(bStr);
-            if (d->backoff <= 0) d->backoff = 1.0;
-            NodeBase *chNode = getDictNode(node, "children");
-            if (!chNode) chNode = getDictNode(node, "entry");
-            if (!chNode) chNode = node;
-            d->children = nodeListToDirectives(chNode, basePath, visited, err);
-        } else {
-            NodeBase *target = getDictNode(node, "entry");
-            if (!target) target = node;
-            d->times = 0;
-            d->backoff = 1.0;
-            d->children = nodeListToDirectives(target, basePath, visited, err);
+        String scalar = nodeStr(node).trim();
+        if (!scalar.isEmpty() && scalar != "true" && scalar != "false") {
+            long long t = parseLong(scalar);
+            if (t >= 0) d->times = (int)t;
         }
+        if (d->times == 0) {
+            String tStr = getProp("times");
+            if (!tStr.isEmpty()) d->times = (int)parseLong(tStr);
+        }
+        String bStr = getProp("backoff", "1s");
+        d->backoff = parseDuration(bStr);
+        if (d->backoff <= 0) d->backoff = 1.0;
+
+        NodeBase *chNode = getPropNode("children");
+        if (!chNode) chNode = getPropNode("entry");
+        if (!chNode) chNode = node;
+        d->children = nodeListToDirectives(chNode, basePath, visited, err);
         return d;
     }
 
@@ -338,6 +350,7 @@ Directive *Manifest::nodeToDirective(NodeBase *node,
     if (key == "dotenv" || key == "env_file" || key == "envfile") {
         auto *d = new DDotenv();
         d->path = nodeStr(node).trim();
+        if (d->path.isEmpty()) d->path = getProp("path").trim();
         return d;
     }
 
@@ -345,19 +358,19 @@ Directive *Manifest::nodeToDirective(NodeBase *node,
     if (key == "spawn") {
         auto *d = new DSpawn();
         d->command = nodeStr(node).trim();
-        if (d->command.isEmpty() || (node->size() > 0 && getDictNode(node, "command") != nullptr)) {
-            String nestedCmd = childString(node, "command").trim();
+        if (d->command.isEmpty() || (origNode && getDictNode(origNode, "command") != nullptr)) {
+            String nestedCmd = getProp("command").trim();
             if (!nestedCmd.isEmpty()) d->command = nestedCmd;
         }
         while (d->command.startsWith("\"") && d->command.endsWith("\"") && d->command.length() >= 2) {
             d->command = d->command.substring(1, d->command.length() - 1);
         }
-        d->waitForExit = childBool(node, "wait", true);
-        d->name        = childString(node, "name");
-        String pidStr  = childString(node, "pid", "");
+        d->waitForExit = getPropBool("wait", true);
+        d->name        = getProp("name");
+        String pidStr  = getProp("pid");
         if (!pidStr.isEmpty()) d->pid = (pid_t)parseLong(pidStr);
-        String ecStr   = childString(node, "exitcode", "");
-        if (ecStr.isEmpty()) ecStr = childString(node, "exit_code", "");
+        String ecStr   = getProp("exitcode");
+        if (ecStr.isEmpty()) ecStr = getProp("exit_code");
         if (!ecStr.isEmpty()) d->exitCode = (int)parseLong(ecStr);
         return d;
     }
@@ -422,80 +435,67 @@ Directive *Manifest::nodeToDirective(NodeBase *node,
 
     if (key == "autofreeze" || key == "auto_freeze" || key == "scale_to_zero") {
         auto *d = new DAutofreeze();
-        if (node->size() > 0) {
-            String wolStr = childString(node, "wol");
-            if (!wolStr.isEmpty()) d->wol = (wolStr != "false" && wolStr != "0" && wolStr != "off");
-            String cpuStr = childString(node, "cpu_threshold");
-            if (cpuStr.isEmpty()) cpuStr = childString(node, "cpu");
-            if (!cpuStr.isEmpty()) {
-                String ctrim = cpuStr.trim();
-                if (ctrim.endsWith("%")) ctrim = ctrim.substring(0, ctrim.length() - 1).trim();
-                d->cpuThreshold = (double)parseLong(ctrim);
-            }
-            String timerStr = childString(node, "timer");
-            if (timerStr.isEmpty()) timerStr = childString(node, "idle");
-            if (timerStr.isEmpty()) timerStr = childString(node, "timeout");
-            if (!timerStr.isEmpty()) {
-                d->rawTimer = timerStr;
-                String t = timerStr.trim();
-                if (t.endsWith("ms")) {
-                    d->timerSeconds = (double)parseLong(t.substring(0, t.length() - 2)) / 1000.0;
-                } else if (t.endsWith("s")) {
-                    d->timerSeconds = (double)parseLong(t.substring(0, t.length() - 1));
-                } else if (t.endsWith("m")) {
-                    d->timerSeconds = (double)parseLong(t.substring(0, t.length() - 1)) * 60.0;
-                } else if (t.endsWith("h")) {
-                    d->timerSeconds = (double)parseLong(t.substring(0, t.length() - 1)) * 3600.0;
-                } else {
-                    long long v = parseLong(t);
-                    if (v > 0) d->timerSeconds = (double)v;
-                }
-            }
-            String enStr = childString(node, "enabled");
-            if (!enStr.isEmpty()) d->enabled = (enStr != "false" && enStr != "0" && enStr != "off");
-        } else {
-            String val = nodeStr(node).trim();
-            if (val == "false" || val == "0" || val == "off") {
-                d->enabled = false;
-            } else if (val == "true" || val == "1" || val == "on") {
-                d->enabled = true;
-            } else if (!val.isEmpty()) {
-                d->rawTimer = val;
-                String t = val;
-                if (t.endsWith("ms")) {
-                    d->timerSeconds = (double)parseLong(t.substring(0, t.length() - 2)) / 1000.0;
-                } else if (t.endsWith("s")) {
-                    d->timerSeconds = (double)parseLong(t.substring(0, t.length() - 1));
-                } else if (t.endsWith("m")) {
-                    d->timerSeconds = (double)parseLong(t.substring(0, t.length() - 1)) * 60.0;
-                } else if (t.endsWith("h")) {
-                    d->timerSeconds = (double)parseLong(t.substring(0, t.length() - 1)) * 3600.0;
-                } else {
-                    long long v = parseLong(t);
-                    if (v > 0) d->timerSeconds = (double)v;
-                }
-                d->enabled = true;
+        String scalar = nodeStr(node).trim();
+        if (!scalar.isEmpty() && scalar != "true" && scalar != "false" && scalar != "on" && scalar != "off") {
+            d->rawTimer = scalar;
+        }
+        String wolStr = getProp("wol");
+        if (!wolStr.isEmpty()) d->wol = (wolStr != "false" && wolStr != "0" && wolStr != "off");
+        String cpuStr = getProp("cpu_threshold");
+        if (cpuStr.isEmpty()) cpuStr = getProp("cpu");
+        if (!cpuStr.isEmpty()) {
+            String ctrim = cpuStr.trim();
+            if (ctrim.endsWith("%")) ctrim = ctrim.substring(0, ctrim.length() - 1).trim();
+            d->cpuThreshold = (double)parseLong(ctrim);
+        }
+        String timerStr = getProp("timer");
+        if (timerStr.isEmpty()) timerStr = getProp("idle");
+        if (timerStr.isEmpty()) timerStr = getProp("timeout");
+        if (timerStr.isEmpty() && !d->rawTimer.isEmpty()) timerStr = d->rawTimer;
+        if (!timerStr.isEmpty()) {
+            d->rawTimer = timerStr;
+            String t = timerStr.trim();
+            if (t.endsWith("ms")) {
+                d->timerSeconds = (double)parseLong(t.substring(0, t.length() - 2)) / 1000.0;
+            } else if (t.endsWith("s")) {
+                d->timerSeconds = (double)parseLong(t.substring(0, t.length() - 1));
+            } else if (t.endsWith("m")) {
+                d->timerSeconds = (double)parseLong(t.substring(0, t.length() - 1)) * 60.0;
+            } else if (t.endsWith("h")) {
+                d->timerSeconds = (double)parseLong(t.substring(0, t.length() - 1)) * 3600.0;
+            } else {
+                long long v = parseLong(t);
+                if (v > 0) d->timerSeconds = (double)v;
             }
         }
+        String enStr = getProp("enabled");
+        if (!enStr.isEmpty()) d->enabled = (enStr != "false" && enStr != "0" && enStr != "off");
+        else if (scalar == "false" || scalar == "0" || scalar == "off") d->enabled = false;
         return d;
     }
 
-    if (key == "chroot" || key == "root") {
+    // ── chroot ────────────────────────────────────────────────────────────────
+    if (key == "chroot") {
         auto *d = new DChroot();
-        d->path = nodeStr(node);
+        d->path = nodeStr(node).trim();
+        if (d->path.isEmpty()) d->path = getProp("path").trim();
         return d;
     }
 
-    if (key == "isolate" || key == "unshare") {
+    // ── isolate ───────────────────────────────────────────────────────────────
+    if (key == "isolate") {
         auto *d = new DIsolate();
         String val = nodeStr(node).trim();
-        if (val.isEmpty()) val = childString(node, "unshare", childString(node, "isolate", "true"));
-        d->enable = (val != "false" && val != "0" && val != "off");
+        if (val == "false" || val == "0" || val == "off" || val == "no") {
+            d->enable = false;
+        } else {
+            d->enable = true;
+        }
         return d;
     }
 
-    if (key == "noread") {
-        auto *d = new DNoRead();
+    // ── path restrictions (noread, nowrite, noexecute, nomount, nowatch) ─────
+    auto parsePathList = [&](DPathRestriction *d) -> Directive * {
         Array<String> items;
         if (node->size() > 0 && (nodeStr(node).isEmpty() || nodeStr(node) == "[]")) {
             for (size_t i = 0; i < node->size(); ++i) {
@@ -508,92 +508,44 @@ Directive *Manifest::nodeToDirective(NodeBase *node,
         }
         d->paths = items;
         return d;
-    }
+    };
 
-    if (key == "nowrite") {
-        auto *d = new DNoWrite();
-        Array<String> items;
-        if (node->size() > 0 && (nodeStr(node).isEmpty() || nodeStr(node) == "[]")) {
-            for (size_t i = 0; i < node->size(); ++i) {
-                String s = nodeStr((*node)[i]).trim();
-                if (!s.isEmpty()) items.push(s);
-            }
-        } else {
-            String s = nodeStr(node).trim();
-            if (!s.isEmpty()) items.push(s);
-        }
-        d->paths = items;
-        return d;
-    }
-
-    if (key == "noexecute" || key == "noexec") {
-        auto *d = new DNoExecute();
-        Array<String> items;
-        if (node->size() > 0 && (nodeStr(node).isEmpty() || nodeStr(node) == "[]")) {
-            for (size_t i = 0; i < node->size(); ++i) {
-                String s = nodeStr((*node)[i]).trim();
-                if (!s.isEmpty()) items.push(s);
-            }
-        } else {
-            String s = nodeStr(node).trim();
-            if (!s.isEmpty()) items.push(s);
-        }
-        d->paths = items;
-        return d;
-    }
-
-    if (key == "nomount") {
-        auto *d = new DNoMount();
-        Array<String> items;
-        if (node->size() > 0 && (nodeStr(node).isEmpty() || nodeStr(node) == "[]")) {
-            for (size_t i = 0; i < node->size(); ++i) {
-                String s = nodeStr((*node)[i]).trim();
-                if (!s.isEmpty()) items.push(s);
-            }
-        } else {
-            String s = nodeStr(node).trim();
-            if (!s.isEmpty()) items.push(s);
-        }
-        d->paths = items;
-        return d;
-    }
-
-    if (key == "nowatch") {
-        auto *d = new DNoWatch();
-        Array<String> items;
-        if (node->size() > 0 && (nodeStr(node).isEmpty() || nodeStr(node) == "[]")) {
-            for (size_t i = 0; i < node->size(); ++i) {
-                String s = nodeStr((*node)[i]).trim();
-                if (!s.isEmpty()) items.push(s);
-            }
-        } else {
-            String s = nodeStr(node).trim();
-            if (!s.isEmpty()) items.push(s);
-        }
-        d->paths = items;
-        return d;
-    }
+    if (key == "noread")    return parsePathList(new DNoRead());
+    if (key == "nowrite")   return parsePathList(new DNoWrite());
+    if (key == "noexecute") return parsePathList(new DNoExecute());
+    if (key == "nomount")   return parsePathList(new DNoMount());
+    if (key == "nowatch")   return parsePathList(new DNoWatch());
 
     if (key == "veth") {
         auto *d = new DVeth();
-        d->source = childString(node, "source");
-        if (d->source.isEmpty()) d->source = childString(node, "host");
-        if (d->source.isEmpty()) d->source = childString(node, "name");
+        String scalar = nodeStr(node).trim();
+        if (!scalar.isEmpty() && scalar != "true" && scalar != "false") {
+            long long colon = scalar.find(":");
+            if (colon >= 0) {
+                d->source = scalar.substring(0, (size_t)colon).trim();
+                d->target = scalar.substring((size_t)colon + 1).trim();
+            } else {
+                d->source = scalar;
+            }
+        }
+        if (d->source.isEmpty()) d->source = getProp("source");
+        if (d->source.isEmpty()) d->source = getProp("host");
+        if (d->source.isEmpty()) d->source = getProp("name");
 
-        d->target = childString(node, "target");
-        if (d->target.isEmpty()) d->target = childString(node, "peer");
+        if (d->target.isEmpty()) d->target = getProp("target");
+        if (d->target.isEmpty()) d->target = getProp("peer");
 
-        d->sip = childString(node, "sip");
-        if (d->sip.isEmpty()) d->sip = childString(node, "source-ip");
-        if (d->sip.isEmpty()) d->sip = childString(node, "source_ip");
-        if (d->sip.isEmpty()) d->sip = childString(node, "host-ip");
-        if (d->sip.isEmpty()) d->sip = childString(node, "host_ip");
+        d->sip = getProp("sip");
+        if (d->sip.isEmpty()) d->sip = getProp("source-ip");
+        if (d->sip.isEmpty()) d->sip = getProp("source_ip");
+        if (d->sip.isEmpty()) d->sip = getProp("host-ip");
+        if (d->sip.isEmpty()) d->sip = getProp("host_ip");
 
-        d->ip = childString(node, "ip");
-        if (d->ip.isEmpty()) d->ip = childString(node, "peer-ip");
-        if (d->ip.isEmpty()) d->ip = childString(node, "peer_ip");
-        if (d->ip.isEmpty()) d->ip = childString(node, "target-ip");
-        if (d->ip.isEmpty()) d->ip = childString(node, "target_ip");
+        d->ip = getProp("ip");
+        if (d->ip.isEmpty()) d->ip = getProp("peer-ip");
+        if (d->ip.isEmpty()) d->ip = getProp("peer_ip");
+        if (d->ip.isEmpty()) d->ip = getProp("target-ip");
+        if (d->ip.isEmpty()) d->ip = getProp("target_ip");
 
         d->hostName = d->source;
         d->peerName = d->target;
@@ -680,120 +632,173 @@ Directive *Manifest::nodeToDirective(NodeBase *node,
 
     if (key == "forward") {
         auto *d = new DForward();
-        d->target     = childString(node, "target");
-        d->source     = childString(node, "source");
-        d->port       = childString(node, "port");
-        d->sourcePort = childString(node, "source-port");
-        String sip    = childString(node, "source-ip");
-        if (sip.isEmpty()) sip = childString(node, "sip");
+        String scalar = nodeStr(node).trim();
+        if (!scalar.isEmpty() && scalar != "true" && scalar != "false") {
+            d->port = scalar;
+        }
+        if (d->port.isEmpty()) d->port = getProp("port");
+        d->target     = getProp("target");
+        d->source     = getProp("source");
+        d->sourcePort = getProp("source-port");
+        String sip    = getProp("source-ip");
+        if (sip.isEmpty()) sip = getProp("sip");
         if (!sip.isEmpty()) d->sourceIP = sip;
-        d->ip         = childString(node, "ip");
-        String proto  = childString(node, "protocol");
+        d->ip         = getProp("ip");
+        String proto  = getProp("protocol");
         if (!proto.isEmpty()) d->protocol = proto;
         return d;
     }
 
     if (key == "macvlan") {
         auto *d = new DMacvlan();
-        d->parent = childString(node, "parent");
-        d->name   = childString(node, "name");
-        String m  = childString(node, "mode");
+        String scalar = nodeStr(node).trim();
+        if (!scalar.isEmpty() && scalar != "true" && scalar != "false") {
+            d->name = scalar;
+        }
+        d->parent = getProp("parent");
+        if (d->name.isEmpty()) d->name = getProp("name");
+        String m  = getProp("mode");
         if (!m.isEmpty()) d->mode = m;
-        d->mac    = childString(node, "mac");
+        d->mac    = getProp("mac");
         return d;
     }
 
     if (key == "ipvlan") {
         auto *d = new DIPVlan();
-        d->parent = childString(node, "parent");
-        d->name   = childString(node, "name");
-        String m  = childString(node, "mode");
+        String scalar = nodeStr(node).trim();
+        if (!scalar.isEmpty() && scalar != "true" && scalar != "false") {
+            d->name = scalar;
+        }
+        d->parent = getProp("parent");
+        if (d->name.isEmpty()) d->name = getProp("name");
+        String m  = getProp("mode");
         if (!m.isEmpty()) d->mode = m;
         return d;
     }
 
     if (key == "bridge") {
         auto *d = new DBridge();
-        d->source  = childString(node, "source");
-        if (d->source.isEmpty()) d->source = childString(node, "name");
-        d->target  = childString(node, "target");
-        if (d->target.isEmpty()) d->target = childString(node, "attach");
-        d->address = childString(node, "address");
-        if (d->address.isEmpty()) d->address = childString(node, "ip");
+        String scalar = nodeStr(node).trim();
+        if (!scalar.isEmpty() && scalar != "true" && scalar != "false") {
+            d->source = scalar;
+        }
+        if (d->source.isEmpty()) d->source = getProp("source");
+        if (d->source.isEmpty()) d->source = getProp("name");
+        d->target  = getProp("target");
+        if (d->target.isEmpty()) d->target = getProp("attach");
+        d->address = getProp("address");
+        if (d->address.isEmpty()) d->address = getProp("ip");
         d->name    = d->source;
         d->attach  = d->target;
         return d;
     }
 
-
-
     if (key == "mount") {
         auto *d = new DMount();
-        d->source = childString(node, "source");
-        d->work   = childString(node, "work");
-        d->target = childString(node, "target");
-        d->read   = childBool(node, "read",  true);
-        d->write  = childBool(node, "write", true);
+        String scalar = nodeStr(node).trim();
+        if (!scalar.isEmpty() && scalar != "true" && scalar != "false") {
+            long long colon = scalar.find(":");
+            if (colon >= 0) {
+                d->source = scalar.substring(0, (size_t)colon).trim();
+                d->target = scalar.substring((size_t)colon + 1).trim();
+            } else {
+                d->source = scalar;
+            }
+        }
+        if (d->source.isEmpty()) d->source = getProp("source");
+        d->work   = getProp("work");
+        if (d->target.isEmpty()) d->target = getProp("target");
+        d->read   = getPropBool("read",  true);
+        d->write  = getPropBool("write", true);
         return d;
     }
 
     if (key == "copy") {
         auto *d = new DCopy();
-        d->source = childString(node, "source");
-        d->target = childString(node, "target");
+        String scalar = nodeStr(node).trim();
+        if (!scalar.isEmpty() && scalar != "true" && scalar != "false") {
+            long long arrow = scalar.find("->");
+            long long colon = scalar.find(":");
+            if (arrow >= 0) {
+                d->source = scalar.substring(0, (size_t)arrow).trim();
+                d->target = scalar.substring((size_t)arrow + 2).trim();
+            } else if (colon >= 0) {
+                d->source = scalar.substring(0, (size_t)colon).trim();
+                d->target = scalar.substring((size_t)colon + 1).trim();
+            } else {
+                d->source = scalar;
+            }
+        }
+        if (d->source.isEmpty()) d->source = getProp("source");
+        if (d->target.isEmpty()) d->target = getProp("target");
         return d;
     }
 
     if (key == "unlink") {
         auto *d = new DUnlink();
-        d->path = nodeStr(node);
-        if (d->path.isEmpty()) d->path = childString(node, "path");
-        logInfo("tau/parse: unlink nodeStr='", nodeStr(node), "' size=", intStr(node->size()), " childString(path)='", childString(node, "path"), "' result='", d->path, "'");
+        d->path = nodeStr(node).trim();
+        if (d->path.isEmpty()) d->path = getProp("path").trim();
         return d;
     }
-
 
     if (key == "mkdir") {
         auto *d = new DMkdir();
-        d->path = nodeStr(node);
-        if (d->path.isEmpty()) d->path = childString(node, "path");
+        d->path = nodeStr(node).trim();
+        if (d->path.isEmpty()) d->path = getProp("path").trim();
         return d;
     }
 
-
     if (key == "symlink") {
         auto *d = new DSymlink();
-        d->source = childString(node, "source");
-        d->target = childString(node, "target");
+        String scalar = nodeStr(node).trim();
+        if (!scalar.isEmpty() && scalar != "true" && scalar != "false") {
+            long long arrow = scalar.find("->");
+            long long colon = scalar.find(":");
+            if (arrow >= 0) {
+                d->source = scalar.substring(0, (size_t)arrow).trim();
+                d->target = scalar.substring((size_t)arrow + 2).trim();
+            } else if (colon >= 0) {
+                d->source = scalar.substring(0, (size_t)colon).trim();
+                d->target = scalar.substring((size_t)colon + 1).trim();
+            } else {
+                d->source = scalar;
+            }
+        }
+        if (d->source.isEmpty()) d->source = getProp("source");
+        if (d->target.isEmpty()) d->target = getProp("target");
         return d;
     }
 
     if (key == "image") {
         auto *d = new DImage();
-        d->source = childString(node, "source");
-        if (d->source.isEmpty()) d->source = childString(node, "path");
+        String scalar = nodeStr(node).trim();
+        if (!scalar.isEmpty() && scalar != "true" && scalar != "false") {
+            d->source = scalar;
+        }
+        if (d->source.isEmpty()) d->source = getProp("source");
+        if (d->source.isEmpty()) d->source = getProp("path");
         d->path   = d->source;
-        d->size   = childString(node, "size", "10G");
-        d->sizeMax = childString(node, "size_max");
-        if (d->sizeMax.isEmpty()) d->sizeMax = childString(node, "max_size");
-        d->type   = childString(node, "type", "ext4");
-        d->table  = childString(node, "table");
+        d->size   = getProp("size", "10G");
+        d->sizeMax = getProp("size_max");
+        if (d->sizeMax.isEmpty()) d->sizeMax = getProp("max_size");
+        d->type   = getProp("type", "ext4");
+        d->table  = getProp("table");
         if (d->table.isEmpty() && (d->type == "gpt" || d->type == "mbr" || d->type == "dos")) {
             d->table = d->type;
         }
-        d->format = childString(node, "format", "raw");
-        d->label  = childString(node, "label");
-        d->create = childBool(node, "create", true);
-        d->resize = childBool(node, "resize", true);
-        d->fsck   = childBool(node, "fsck",   true);
-        d->upper  = childString(node, "upper");
-        d->work   = childString(node, "work");
-        d->lower  = childString(node, "lower");
-        d->target = childString(node, "target");
-        d->read   = childBool(node, "read",  true);
-        d->write  = childBool(node, "write", true);
+        d->format = getProp("format", "raw");
+        d->label  = getProp("label");
+        d->create = getPropBool("create", true);
+        d->resize = getPropBool("resize", true);
+        d->fsck   = getPropBool("fsck",   true);
+        d->upper  = getProp("upper");
+        d->work   = getProp("work");
+        d->lower  = getProp("lower");
+        d->target = getProp("target");
+        d->read   = getPropBool("read",  true);
+        d->write  = getPropBool("write", true);
 
-        NodeBase *partNode = getDictNode(node, "partitions");
+        NodeBase *partNode = getPropNode("partitions");
         if (partNode) {
             for (size_t i = 0; i < partNode->size(); ++i) {
                 auto *pn = (*partNode)[i];
@@ -826,8 +831,12 @@ Directive *Manifest::nodeToDirective(NodeBase *node,
 
     if (key == "docker") {
         auto *d = new DDocker();
-        d->image  = childString(node, "image");
-        if (d->image.isEmpty()) d->image = childString(node, "source");
+        String scalar = nodeStr(node).trim();
+        if (!scalar.isEmpty() && scalar != "true" && scalar != "false") {
+            d->image = scalar;
+        }
+        if (d->image.isEmpty()) d->image = getProp("image");
+        if (d->image.isEmpty()) d->image = getProp("source");
 
         // Handle unquoted image:tag where tag was parsed as child node (e.g. :latest)
         for (size_t di = 0; di < node->size(); ++di) {
@@ -843,29 +852,39 @@ Directive *Manifest::nodeToDirective(NodeBase *node,
             }
         }
 
-        if (d->target.isEmpty() || d->target == "true") d->target = childString(node, "target");
-        d->source = childString(node, "source");
-        if (d->source == d->image) d->source = childString(node, "upper");
-        d->work   = childString(node, "work");
-        d->read   = childBool(node, "read", true);
-        d->write  = childBool(node, "write", true);
+        d->download = getProp("download");
+        d->lower    = getProp("lower");
+        d->target   = getProp("target");
+        d->source   = getProp("source");
+        if (d->source == d->image) d->source = "";
+        if (d->source.isEmpty()) d->source = getProp("upper");
+        d->work     = getProp("work");
+        d->read     = getPropBool("read", true);
+        d->write    = getPropBool("write", true);
         return d;
     }
 
     if (key == "vm") {
         auto *d = new DVM();
-        d->kernel      = childString(node, "kernel");
-        d->initrd      = childString(node, "initrd");
-        d->cmdline     = childString(node, "cmdline");
-        String hyp     = childString(node, "hypervisor");
+        String scalar = nodeStr(node).trim();
+        if (!scalar.isEmpty() && scalar != "true" && scalar != "false") {
+            VMDrive drv;
+            drv.source = scalar;
+            drv.format = "auto";
+            d->drives.push(drv);
+        }
+        d->kernel      = getProp("kernel");
+        d->initrd      = getProp("initrd");
+        d->cmdline     = getProp("cmdline");
+        String hyp     = getProp("hypervisor");
         if (!hyp.isEmpty()) d->hypervisor = hyp;
-        String acc     = childString(node, "accel");
+        String acc     = getProp("accel");
         if (!acc.isEmpty()) d->accel = acc;
-        d->waitForExit = childBool(node, "wait", true);
-        d->name        = childString(node, "name");
+        d->waitForExit = getPropBool("wait", true);
+        d->name        = getProp("name");
 
-        NodeBase *drivesNode = getDictNode(node, "drives");
-        if (!drivesNode) drivesNode = getDictNode(node, "drive");
+        NodeBase *drivesNode = getPropNode("drives");
+        if (!drivesNode) drivesNode = getPropNode("drive");
 
         if (drivesNode) {
             for (size_t i = 0; i < drivesNode->size(); ++i) {
@@ -887,13 +906,13 @@ Directive *Manifest::nodeToDirective(NodeBase *node,
                 if (!drv.source.isEmpty()) d->drives.push(drv);
             }
         } else {
-            String singleDrive = childString(node, "drive");
+            String singleDrive = getProp("drive");
             if (!singleDrive.isEmpty()) {
                 VMDrive drv;
                 drv.source = singleDrive;
-                drv.format = childString(node, "format", "auto");
-                drv.read   = childBool(node, "read", true);
-                drv.write  = childBool(node, "write", true);
+                drv.format = getProp("format", "auto");
+                drv.read   = getPropBool("read", true);
+                drv.write  = getPropBool("write", true);
                 d->drives.push(drv);
             }
         }
@@ -902,28 +921,47 @@ Directive *Manifest::nodeToDirective(NodeBase *node,
 
     if (key == "local") {
         auto *d = new DLocal();
-        d->source = childString(node, "source");
-        d->target = childString(node, "target");
-        d->store  = childBool(node, "store", true);
+        String scalar = nodeStr(node).trim();
+        if (!scalar.isEmpty() && scalar != "true" && scalar != "false") {
+            d->source = scalar;
+        }
+        if (d->source.isEmpty()) d->source = getProp("source");
+        if (d->source.isEmpty()) d->source = getProp("path");
+        d->target   = getProp("target");
+        d->store    = getPropBool("store", true);
+        d->download = getPropBool("download", false);
         return d;
     }
 
-
-    if (key == "git") {
+    if (key == "git" || key == "github") {
         auto *d = new DGit();
-        d->source = childString(node, "source");
-        d->branch = childString(node, "branch", "main");
-        d->target = childString(node, "target");
-        d->store  = childBool(node, "store", true);
+        String scalar = nodeStr(node).trim();
+        if (!scalar.isEmpty() && scalar != "true" && scalar != "false") {
+            d->source = scalar;
+        }
+        if (d->source.isEmpty()) d->source = getProp("source");
+        if (d->source.isEmpty()) d->source = getProp("repo");
+        if (d->source.isEmpty()) d->source = getProp("url");
+        d->branch   = getProp("branch", "main");
+        if (d->branch == "main" && !getProp("tag").isEmpty()) d->branch = getProp("tag");
+        d->target   = getProp("target");
+        d->store    = getPropBool("store", true);
+        d->download = getPropBool("download", false);
         return d;
     }
 
     if (key == "ghrelease") {
         auto *d = new DGHRelease();
-        d->source = childString(node, "source");
-        d->branch = childString(node, "branch");
-        d->name   = childString(node, "name");
-        d->target = childString(node, "target");
+        String scalar = nodeStr(node).trim();
+        if (!scalar.isEmpty() && scalar != "true" && scalar != "false") {
+            d->source = scalar;
+        }
+        if (d->source.isEmpty()) d->source = getProp("source");
+        if (d->source.isEmpty()) d->source = getProp("repo");
+        d->branch = getProp("branch");
+        if (d->branch.isEmpty()) d->branch = getProp("tag");
+        d->name   = getProp("name");
+        d->target = getProp("target");
         return d;
     }
 
@@ -1124,10 +1162,14 @@ Directive *Manifest::nodeToDirective(NodeBase *node,
     // ── bin ───────────────────────────────────────────────────────────────────
     if (key == "bin") {
         auto *d = new DBin();
-        d->name        = childString(node, "name");
-        d->description = childString(node, "description");
-        d->icon        = childString(node, "icon");
-        NodeBase *entryNode = node->get("entry");
+        String scalar = nodeStr(node).trim();
+        if (!scalar.isEmpty() && scalar != "true" && scalar != "false") {
+            d->name = scalar;
+        }
+        if (d->name.isEmpty()) d->name = getProp("name");
+        d->description = getProp("description");
+        d->icon        = getProp("icon");
+        NodeBase *entryNode = getPropNode("entry");
         if (entryNode) d->entry = nodeListToDirectives(entryNode, basePath, visited, err);
         return d;
     }
